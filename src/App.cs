@@ -88,6 +88,12 @@ namespace DeepSeekHarness
         private bool ownsServer;
         private bool shuttingDown;
         private bool navWarned;
+        private NotifyIcon trayIcon;
+        private bool trayExit;
+
+        [System.Runtime.InteropServices.DllImport("user32.dll")]
+        [return: System.Runtime.InteropServices.MarshalAs(System.Runtime.InteropServices.UnmanagedType.Bool)]
+        private static extern bool SetForegroundWindow(IntPtr hWnd);
 
         public MainForm()
         {
@@ -112,6 +118,8 @@ namespace DeepSeekHarness
             };
             Controls.Add(statusLabel);
 
+            InitializeTray();
+
             Shown += async delegate { await InitializeAsync(); };
         }
 
@@ -132,7 +140,7 @@ namespace DeepSeekHarness
                     MessageBox.Show("DeepSeek Harness 启动失败：\r\n\r\n" + ex.Message + ErrorTailText(),
                         "DeepSeek Harness", MessageBoxButtons.OK, MessageBoxIcon.Error);
                 }
-                BeginInvoke(new Action(Close));
+                BeginInvoke(new Action(RequestExit));
             }
         }
 
@@ -148,7 +156,7 @@ namespace DeepSeekHarness
                         MessageBox.Show(
                             "未检测到 WebView2 运行时，应用无法启动。\n请先从 https://aka.ms/webview2 安装后重试。",
                             "DeepSeek Harness", MessageBoxButtons.OK, MessageBoxIcon.Error);
-                    BeginInvoke(new Action(Close));
+                    BeginInvoke(new Action(RequestExit));
                     return;
                 }
             }
@@ -378,8 +386,18 @@ namespace DeepSeekHarness
             }
         }
 
+        // 托盘常驻：点 X（用户关闭）不直接退出，最小化到托盘并继续运行 dsh 服务，
+        // 避免误关后重开又要等启动。只有「真正退出」菜单或程序自身异常才走彻底关闭。
         protected override void OnFormClosing(FormClosingEventArgs e)
         {
+            if (!trayExit && e.CloseReason == CloseReason.UserClosing)
+            {
+                e.Cancel = true;
+                Hide();
+                ShowTrayHint();
+                return;
+            }
+
             if (!shuttingDown)
             {
                 shuttingDown = true;
@@ -397,6 +415,67 @@ namespace DeepSeekHarness
                 serverProc = null;
             }
             base.OnFormClosing(e);
+        }
+
+        protected override void OnFormClosed(FormClosedEventArgs e)
+        {
+            if (trayIcon != null) { trayIcon.Visible = false; trayIcon.Dispose(); trayIcon = null; }
+            base.OnFormClosed(e);
+        }
+
+        // 初始化系统托盘图标与右键菜单（显示主界面 / 真正退出）。
+        private void InitializeTray()
+        {
+            trayIcon = new NotifyIcon
+            {
+                Icon = this.Icon ?? SystemIcons.Application,
+                Text = "DeepSeek Harness",
+                Visible = true,
+                ContextMenuStrip = BuildTrayMenu()
+            };
+            trayIcon.DoubleClick += (s, ev) => ShowForm();
+        }
+
+        private ContextMenuStrip BuildTrayMenu()
+        {
+            var menu = new ContextMenuStrip();
+            var open = new ToolStripMenuItem("显示主界面");
+            open.Click += (s, ev) => ShowForm();
+            var exit = new ToolStripMenuItem("真正退出");
+            exit.Click += (s, ev) => RequestExit();
+            menu.Items.Add(open);
+            menu.Items.Add(new ToolStripSeparator());
+            menu.Items.Add(exit);
+            return menu;
+        }
+
+        // 从托盘恢复主窗口并置于前台。
+        private void ShowForm()
+        {
+            if (WindowState == FormWindowState.Minimized) WindowState = FormWindowState.Normal;
+            Show();
+            Activate();
+            try { SetForegroundWindow(this.Handle); } catch { }
+        }
+
+        // 真正退出：隐藏托盘图标并彻底关闭（OnFormClosing 会据此清理 dsh 服务）。
+        private void RequestExit()
+        {
+            trayExit = true;
+            if (trayIcon != null) trayIcon.Visible = false;
+            Close();
+        }
+
+        private void ShowTrayHint()
+        {
+            if (trayIcon == null) return;
+            try
+            {
+                trayIcon.ShowBalloonTip(3000, "DeepSeek Harness",
+                    "已最小化到系统托盘，本地服务仍在运行。右键托盘图标可「真正退出」。",
+                    ToolTipIcon.Info);
+            }
+            catch { }
         }
 
         // 递归杀掉整棵进程树（WMI 查子进程），确保关窗即停、无残留。
