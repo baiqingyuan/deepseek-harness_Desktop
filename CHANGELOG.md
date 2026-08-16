@@ -8,6 +8,9 @@
 - **托盘恢复改为单击**：原需双击托盘图标或右键「显示主界面」才能恢复窗口，现改为**单击托盘图标**即可恢复，更顺手；右键菜单仍保留「显示主界面 / 真正退出」。
 - **升级底层 dsh 到 `0.1.1-rc.2`**：`build.ps1` 的 `DshVersion` 由 `0.1.0-rc.6` 升级到官方当前最新 `0.1.1-rc.2`（npm `latest`/`next` 均指向此；0.1.1 系新增开箱即用的视觉模型支持 `deepseek-v4-flash-vision-exp`）。dsh 仍处 Developer Preview、官方警告存在破坏兼容性变更，本次仅跟进 RC，未升到稳定版（稳定版尚未发布）。
 
+### 安全 / 构建 (Security / Build)
+- **CI 接入 SignPath 免费代码签名**：`release.yml` 在构建出 `Setup.exe` 后新增签名步骤（上传产物 → 提交 SignPath 签名 → 回写 `dist/`）。仅在仓库配置 `SIGNPATH_API_TOKEN` 等 Secrets 时生效，未配置则自动跳过、照常发布未签名包，不破坏现有流程。签名后 `Setup.exe` 由「未知发布者」升级为受 Windows 信任的 OV 证书（发布者显示为 SignPath Foundation）。
+
 ## [0.3.0] - 2026-08-16
 
 > 托盘常驻：关闭窗口不再直接停服务，而是最小化到系统托盘继续运行，避免误关后重等启动；并提供「真正退出」菜单彻底关闭。

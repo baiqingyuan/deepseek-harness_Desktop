@@ -12,6 +12,7 @@ on:
 
 permissions:
   contents: write
+  actions: read
 
 jobs:
   build:
@@ -56,6 +57,38 @@ jobs:
       - name: Package
         shell: pwsh
         run: ./package-release.ps1 -Version ${{ steps.ver.outputs.version }}
+
+      # ---- SignPath 代码签名（免费 OSS 证书，OV 级，受 Windows 信任）----
+      # 仅在仓库配置了 SIGNPATH_API_TOKEN 等 Secrets 时执行；否则整段跳过，照常发布未签名包。
+      # 需要在 SignPath 控制台配置：Organization、Project、Signing Policy、Artifact Configuration（root type = ZIP，匹配 *.exe）。
+      - name: Upload unsigned Setup.exe for signing
+        id: upload-unsigned
+        if: ${{ secrets.SIGNPATH_API_TOKEN != '' }}
+        uses: actions/upload-artifact@v4
+        with:
+          name: unsigned-setup
+          path: dist/DeepSeekHarness-Setup-*.exe
+
+      - name: Submit signing request to SignPath
+        id: signpath
+        if: ${{ secrets.SIGNPATH_API_TOKEN != '' }}
+        uses: signpath/github-action-submit-signing-request@v2
+        with:
+          api-token: ${{ secrets.SIGNPATH_API_TOKEN }}
+          organization-id: ${{ secrets.SIGNPATH_ORG_ID }}
+          project-slug: ${{ secrets.SIGNPATH_PROJECT_SLUG }}
+          signing-policy-slug: ${{ secrets.SIGNPATH_SIGNING_POLICY_SLUG }}
+          github-artifact-id: ${{ steps.upload-unsigned.outputs.artifact-id }}
+          wait-for-completion: true
+          wait-for-completion-timeout-in-seconds: 3600
+          output-artifact-directory: signed
+
+      - name: Replace dist with signed Setup.exe
+        if: ${{ secrets.SIGNPATH_API_TOKEN != '' }}
+        shell: pwsh
+        run: |
+          # SignPath 把签名结果下载到 signed/，覆盖回 dist/，后续发布步骤复用同一路径
+          Copy-Item -Path "signed/dist/*" -Destination "dist/" -Recurse -Force
 
       - name: Upload release assets
         uses: softprops/action-gh-release@v2
