@@ -433,7 +433,8 @@ namespace DeepSeekHarness
                 Visible = true,
                 ContextMenuStrip = BuildTrayMenu()
             };
-            trayIcon.DoubleClick += (s, ev) => ShowForm();
+            // 单击托盘图标即恢复主窗口（用户要求比双击更顺手）；双击同样生效无副作用。
+            trayIcon.Click += (s, ev) => ShowForm();
         }
 
         private ContextMenuStrip BuildTrayMenu()
@@ -472,7 +473,7 @@ namespace DeepSeekHarness
             try
             {
                 trayIcon.ShowBalloonTip(3000, "DeepSeek Harness",
-                    "已最小化到系统托盘，本地服务仍在运行。右键托盘图标可「真正退出」。",
+                    "已最小化到系统托盘，本地服务仍在运行。单击托盘图标恢复窗口，右键可「真正退出」。",
                     ToolTipIcon.Info);
             }
             catch { }
