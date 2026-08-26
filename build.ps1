@@ -1,7 +1,7 @@
 ﻿# build.ps1 - 一键构建 DeepSeek Harness Desktop 便携版
 # 用法: ./build.ps1  （需要联网；Windows PowerShell / pwsh）
 param(
-    [string]$DshVersion = "0.1.0-rc.6",
+    [string]$DshVersion = "0.1.1-rc.2",
     [string]$WebView2Version = "1.0.4129.50",
     [string]$Version = "0.2.0"
 )
