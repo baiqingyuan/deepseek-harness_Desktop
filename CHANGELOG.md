@@ -2,7 +2,9 @@
 
 本项目所有重要改动记录于此。格式参考 [Keep a Changelog](https://keepachangelog.com/)，版本号遵循 [语义化版本](https://semver.org/lang/zh-CN/)。
 
-## [Unreleased]
+## [0.3.1] - 2026-08-26
+
+> **已发布**：[Release v0.3.1](https://github.com/baiqingyuan/deepseek-harness_Desktop/releases/tag/v0.3.1) 包含 zip（便携版）与 `Setup.exe`（NSIS 安装包）两个产物，由 CI 自动构建发布。
 
 ### 变更 (Changed)
 - **托盘恢复改为单击**：原需双击托盘图标或右键「显示主界面」才能恢复窗口，现改为**单击托盘图标**即可恢复，更顺手；右键菜单仍保留「显示主界面 / 真正退出」。
