@@ -17,6 +17,11 @@ permissions:
 jobs:
   build:
     runs-on: windows-latest
+    env:
+      # `if:` 条件中不允许引用 secrets 上下文（会报 Unrecognized named-value: 'secrets'，
+      # 导致整个工作流文件非法、一次 job 都不跑）。因此在这里先把「是否配置了 SignPath」
+      # 求值成普通环境变量，下面的步骤再用 env.SIGNPATH_ENABLED 判断。
+      SIGNPATH_ENABLED: ${{ secrets.SIGNPATH_API_TOKEN != '' }}
     steps:
       - name: Checkout
         uses: actions/checkout@v4
@@ -63,7 +68,7 @@ jobs:
       # 需要在 SignPath 控制台配置：Organization、Project、Signing Policy、Artifact Configuration（root type = ZIP，匹配 *.exe）。
       - name: Upload unsigned Setup.exe for signing
         id: upload-unsigned
-        if: ${{ secrets.SIGNPATH_API_TOKEN != '' }}
+        if: env.SIGNPATH_ENABLED == 'true'
         uses: actions/upload-artifact@v4
         with:
           name: unsigned-setup
@@ -71,7 +76,7 @@ jobs:
 
       - name: Submit signing request to SignPath
         id: signpath
-        if: ${{ secrets.SIGNPATH_API_TOKEN != '' }}
+        if: env.SIGNPATH_ENABLED == 'true'
         uses: signpath/github-action-submit-signing-request@v2
         with:
           api-token: ${{ secrets.SIGNPATH_API_TOKEN }}
@@ -84,7 +89,7 @@ jobs:
           output-artifact-directory: signed
 
       - name: Replace dist with signed Setup.exe
-        if: ${{ secrets.SIGNPATH_API_TOKEN != '' }}
+        if: env.SIGNPATH_ENABLED == 'true'
         shell: pwsh
         run: |
           # SignPath 把签名结果下载到 signed/，覆盖回 dist/，后续发布步骤复用同一路径
