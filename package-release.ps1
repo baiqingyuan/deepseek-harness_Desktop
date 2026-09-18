@@ -1,6 +1,6 @@
 ﻿# package-release.ps1 - 把 dist\DeepSeekHarness 打包成 zip（含 DeepSeekHarness/ 外层文件夹）
 # 使用系统自带 tar（bsdtar），压缩较慢属正常，请耐心等待。
-param([string]$Version = "0.6.0")
+param([string]$Version = "0.7.0")
 $ErrorActionPreference = 'Stop'
 $root = Split-Path -Parent $MyInvocation.MyCommand.Path
 $dist = Join-Path $root "dist"

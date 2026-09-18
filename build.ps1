@@ -6,7 +6,7 @@ param(
     [string]$DshVersion = "0.1.5-rc.2",
     [string]$WebView2Version = "1.0.4129.50",
     [string]$NodeVersion = "v24.21.0",
-    [string]$Version = "0.6.0"
+    [string]$Version = "0.7.0"
 )
 $ErrorActionPreference = 'Stop'
 
@@ -153,6 +153,7 @@ namespace DeepSeekHarness
 
 & $csc /nologo /target:winexe /platform:x64 /optimize+ `
     "/win32icon:$root\icons\DeepSeekHarness.ico" `
+    "/win32manifest:$root\src\app.manifest" `
     "/out:$dist\DeepSeekHarness.exe" `
     /r:System.dll /r:System.Core.dll /r:System.Drawing.dll /r:System.Windows.Forms.dll /r:System.Management.dll `
     "/r:$coreDll" `

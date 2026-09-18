@@ -15,6 +15,7 @@
 
 - Windows 自带 .NET Framework 4.8 编译器：`C:\Windows\Microsoft.NET\Framework64\v4.0.30319\csc.exe`
 - `src\Version.cs`：提供版本号常量 `AppInfo.Version`（「检查更新」据此与最新版比对）。手工编译时直接用仓库里的默认值即可，正式构建由 `build.ps1` 按 `-Version` 注入。
+- `src\app.manifest`：声明 PerMonitorV2 高 DPI 感知。**必须嵌入**，否则 exe 在 125%/150% 缩放的屏幕上会被 Windows 位图拉伸，界面（含 WebView2 里的网页）明显发虚。
 - WebView2 .NET 程序集：`Microsoft.Web.WebView2.Core.dll`、`Microsoft.Web.WebView2.WinForms.dll`、`WebView2Loader.dll`
   - 运行 `build.ps1` 会在 `dist\_wv2` 下自动下载并解压这三个文件；也可从 NuGet 包 `Microsoft.Web.WebView2` 手动取 `lib\net462\` 与 `runtimes\win-x64\native\`。
 
@@ -24,6 +25,7 @@ $csc  = "C:\Windows\Microsoft.NET\Framework64\v4.0.30319\csc.exe"
 $lib  = Join-Path $root "dist\_wv2"
 & $csc /nologo /target:winexe /platform:x64 /optimize+ `
   "/win32icon:$root\icons\DeepSeekHarness.ico" `
+  "/win32manifest:$root\src\app.manifest" `
   "/out:$root\dist\DeepSeekHarness\DeepSeekHarness.exe" `
   /r:System.dll /r:System.Core.dll /r:System.Drawing.dll /r:System.Windows.Forms.dll /r:System.Management.dll `
   "/r:$lib\Microsoft.Web.WebView2.Core.dll" `

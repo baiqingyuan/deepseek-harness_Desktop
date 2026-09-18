@@ -1,6 +1,7 @@
 ﻿using System;
 using System.Diagnostics;
 using System.Drawing;
+using System.Drawing.Drawing2D;
 using System.IO;
 using System.Net;
 using System.Net.Sockets;
@@ -24,6 +25,9 @@ namespace DeepSeekHarness
         {
             Application.EnableVisualStyles();
             Application.SetCompatibleTextRenderingDefault(false);
+            // 让 WinForms 按每显示器 DPI 缩放（配合 src/app.manifest 的 PerMonitorV2 声明）。
+            // 用反射调用，避免在只装了 .NET Framework 4.6 及更旧的机器上直接 MissingMethodException。
+            TryEnablePerMonitorV2();
 
             // 单实例：避免多个 exe 同时拉起/接管同一服务，导致互相误杀。
             // 用 initiallyOwned=false + WaitOne(0) 的方式，避免上一个实例崩溃留下的
@@ -48,6 +52,24 @@ namespace DeepSeekHarness
                 try { singleInstance.ReleaseMutex(); } catch { }
                 singleInstance.Dispose();
             }
+        }
+
+        // Application.SetHighDpiMode(HighDpiMode.PerMonitorV2) 仅在 .NET Framework 4.7+ 存在，
+        // 因此用反射探测调用；失败不影响运行（exe 内嵌 manifest 已声明进程级 DPI 感知）。
+        private static void TryEnablePerMonitorV2()
+        {
+            try
+            {
+                Type modeType = Type.GetType("System.Windows.Forms.HighDpiMode, System.Windows.Forms");
+                if (modeType == null) return;
+                object mode = Enum.Parse(modeType, "PerMonitorV2");
+                System.Reflection.MethodInfo mi = typeof(Application).GetMethod(
+                    "SetHighDpiMode",
+                    System.Reflection.BindingFlags.Static | System.Reflection.BindingFlags.Public,
+                    null, new Type[] { modeType }, null);
+                if (mi != null) mi.Invoke(null, new object[] { mode });
+            }
+            catch { }
         }
 
         private static void BringExistingToFront()
@@ -76,6 +98,21 @@ namespace DeepSeekHarness
         private static extern bool SetForegroundWindow(IntPtr hWnd);
     }
 
+    // iOS 风格配色（取自 Apple 官方 System Colors）与统一的字体
+    internal static class UI
+    {
+        public static readonly Color WindowBg = Color.FromArgb(242, 242, 247);       // systemGray6
+        public static readonly Color Bar = Color.FromArgb(249, 249, 249);            // 接近 iOS 导航栏的浅色
+        public static readonly Color Separator = Color.FromArgb(198, 198, 200);      // separator
+        public static readonly Color Label = Color.FromArgb(29, 29, 31);             // label
+        public static readonly Color LabelSecondary = Color.FromArgb(142, 142, 147); // secondaryLabel
+        public static readonly Color Card = Color.White;
+        public static readonly Color Accent = Color.FromArgb(0, 122, 255);           // systemBlue
+        public const string FontName = "Segoe UI";                                   // Win11 为 Segoe UI Variable
+        public const int TitleBarHeight = 44;                                        // iOS 导航栏高度
+        public const int CornerRadius = 12;
+    }
+
     internal sealed class MainForm : Form
     {
         private const int DefaultPort = 3080;
@@ -91,7 +128,13 @@ namespace DeepSeekHarness
         // 桌面壳必须拿到它才能通过新版 Web 控制台的浏览器鉴权（否则所有 /api 调用 401）。
         private readonly TaskCompletionSource<string> readyUrlSource = new TaskCompletionSource<string>();
         private string diagnosticsHint;
-        private Label statusLabel;
+        private Panel titleBar;
+        private Label titleLabel;
+        private Label portBadge;
+        private Panel loadingCard;
+        private Label loadingText;
+        private ResizeGrip[] grips;
+        private bool roundedByDwm;
         private Process serverProc;
         private bool ownsServer;
         private bool shuttingDown;
@@ -114,6 +157,32 @@ namespace DeepSeekHarness
         [return: System.Runtime.InteropServices.MarshalAs(System.Runtime.InteropServices.UnmanagedType.Bool)]
         private static extern bool SetForegroundWindow(IntPtr hWnd);
 
+        // ---- 无边框窗口自绘所需 ----
+        private const int WM_NCLBUTTONDOWN = 0x00A1;
+        private const int WM_NCHITTEST = 0x0084;
+        private const int HTCAPTION = 2;
+        private const int HTLEFT = 10, HTRIGHT = 11, HTTOP = 12, HTTOPLEFT = 13,
+                          HTTOPRIGHT = 14, HTBOTTOM = 15, HTBOTTOMLEFT = 16, HTBOTTOMRIGHT = 17;
+        private const int DWMWA_WINDOW_CORNER_PREFERENCE = 33;
+        private const int DWMWCP_ROUND = 2;
+
+        [System.Runtime.InteropServices.DllImport("user32.dll")]
+        [return: System.Runtime.InteropServices.MarshalAs(System.Runtime.InteropServices.UnmanagedType.Bool)]
+        private static extern bool ReleaseCapture();
+
+        [System.Runtime.InteropServices.DllImport("user32.dll")]
+        private static extern IntPtr SendMessage(IntPtr hWnd, int msg, IntPtr wParam, IntPtr lParam);
+
+        [System.Runtime.InteropServices.DllImport("gdi32.dll")]
+        private static extern IntPtr CreateRoundRectRgn(int x1, int y1, int x2, int y2, int w, int h);
+
+        [System.Runtime.InteropServices.DllImport("gdi32.dll")]
+        [return: System.Runtime.InteropServices.MarshalAs(System.Runtime.InteropServices.UnmanagedType.Bool)]
+        private static extern bool DeleteObject(IntPtr hObject);
+
+        [System.Runtime.InteropServices.DllImport("dwmapi.dll")]
+        private static extern int DwmSetWindowAttribute(IntPtr hwnd, int attr, ref int attrValue, int attrSize);
+
         public MainForm()
         {
             baseDir = AppDomain.CurrentDomain.BaseDirectory;
@@ -122,24 +191,308 @@ namespace DeepSeekHarness
 
             Text = "DeepSeek Harness";
             ClientSize = new Size(1280, 820);
+            MinimumSize = new Size(760, 560);
             StartPosition = FormStartPosition.CenterScreen;
-            BackColor = Color.White;
+            BackColor = UI.WindowBg;
+            // 无边框 + 自绘 iOS 风格导航栏（系统标题栏无法做成 iOS 的样子）
+            FormBorderStyle = FormBorderStyle.None;
+            AutoScaleMode = AutoScaleMode.Dpi;
+            Font = new Font(UI.FontName, 9f);
             try { Icon = Icon.ExtractAssociatedIcon(Application.ExecutablePath); } catch { }
 
-            // 启动期占位提示，避免白屏 + 让 UI 在等待服务时仍响应。
-            statusLabel = new Label
-            {
-                Dock = DockStyle.Fill,
-                TextAlign = ContentAlignment.MiddleCenter,
-                Text = "正在启动 DeepSeek Harness 本地服务…",
-                Font = new Font("Microsoft YaHei", 12),
-                ForeColor = Color.FromArgb(90, 90, 90)
-            };
-            Controls.Add(statusLabel);
+            BuildLoadingPlaceholder();
+            BuildTitleBar();
+            BuildResizeGrips();
 
             InitializeTray();
 
             Shown += async delegate { await InitializeAsync(); };
+        }
+
+        // ---------- iOS 风格窗口外观 ----------
+
+        // CS_DROPSHADOW：无边框窗口没有系统边框阴影，手动加才有浮起感
+        protected override CreateParams CreateParams
+        {
+            get
+            {
+                CreateParams cp = base.CreateParams;
+                cp.ClassStyle |= 0x00020000;
+                return cp;
+            }
+        }
+
+        protected override void OnHandleCreated(EventArgs e)
+        {
+            base.OnHandleCreated(e);
+            ApplyCorners();
+        }
+
+        protected override void OnResize(EventArgs e)
+        {
+            base.OnResize(e);
+            ApplyCorners();
+            LayoutGrips();
+        }
+
+        // 无边框窗口没有系统边框，缩放热区需要自己做：
+        // 用 8 个贴边的透明抓手控件（4 边 + 4 角）投递 WM_NCLBUTTONDOWN。
+        // 之所以不用 WndProc 处理 WM_NCHITTEST：WebView2 覆盖了整个客户区，
+        // 鼠标落在子窗口上时该消息根本不会派发到窗体，命中测试拿不到。
+        private void BuildResizeGrips()
+        {
+            int[] hits = new int[]
+            { HTTOPLEFT, HTTOP, HTTOPRIGHT, HTRIGHT, HTBOTTOMRIGHT, HTBOTTOM, HTBOTTOMLEFT, HTLEFT };
+            grips = new ResizeGrip[hits.Length];
+            for (int i = 0; i < hits.Length; i++)
+            {
+                grips[i] = new ResizeGrip(this, hits[i]);
+                Controls.Add(grips[i]); // 最后添加 → 位于最上层
+            }
+            LayoutGrips();
+        }
+
+        private void LayoutGrips()
+        {
+            if (grips == null) return;
+            int g = 6;
+            int w = ClientSize.Width, h = ClientSize.Height;
+            // 角（12x12）
+            grips[0].Bounds = new Rectangle(0, 0, g * 2, g * 2);
+            grips[2].Bounds = new Rectangle(w - g * 2, 0, g * 2, g * 2);
+            grips[4].Bounds = new Rectangle(w - g * 2, h - g * 2, g * 2, g * 2);
+            grips[6].Bounds = new Rectangle(0, h - g * 2, g * 2, g * 2);
+            // 边
+            grips[1].Bounds = new Rectangle(g * 2, 0, Math.Max(0, w - g * 4), g);
+            grips[3].Bounds = new Rectangle(w - g, g * 2, g, Math.Max(0, h - g * 4));
+            grips[5].Bounds = new Rectangle(g * 2, h - g, Math.Max(0, w - g * 4), g);
+            grips[7].Bounds = new Rectangle(0, g * 2, g, Math.Max(0, h - g * 4));
+
+            bool show = WindowState != FormWindowState.Maximized;
+            for (int i = 0; i < grips.Length; i++) grips[i].Visible = show;
+        }
+
+        // WebView2 是运行时才加入的，加进来会盖住抓手，需要重新提到最上层
+        private void BringGripsToFront()
+        {
+            if (grips == null) return;
+            for (int i = 0; i < grips.Length; i++) grips[i].BringToFront();
+        }
+
+        // iOS 导航栏：浅色底 + 底部 1px 分隔线 + 左侧交通灯 + 居中标题 + 右侧端口徽章
+        private void BuildTitleBar()
+        {
+            titleBar = new Panel { Dock = DockStyle.Top, Height = UI.TitleBarHeight, BackColor = UI.Bar };
+            titleBar.Paint += delegate (object s, PaintEventArgs e)
+            {
+                using (Pen p = new Pen(UI.Separator))
+                    e.Graphics.DrawLine(p, 0, titleBar.Height - 1, titleBar.Width, titleBar.Height - 1);
+            };
+            // 无边框窗口没有系统标题栏，鼠标按下时投递 HTCAPTION 模拟拖动
+            titleBar.MouseDown += delegate (object s, MouseEventArgs e)
+            {
+                if (e.Button == MouseButtons.Left && WindowState != FormWindowState.Maximized)
+                {
+                    ReleaseCapture();
+                    SendMessage(Handle, WM_NCLBUTTONDOWN, (IntPtr)HTCAPTION, IntPtr.Zero);
+                }
+            };
+            titleBar.MouseDoubleClick += delegate { ToggleMaximize(); };
+
+            int top = (UI.TitleBarHeight - 13) / 2;
+            TrafficLight close = new TrafficLight(Color.FromArgb(255, 95, 87), TrafficLight.Glyph.Close)
+            { Left = 14, Top = top };
+            close.Click += delegate { Close(); }; // 关窗即最小化到托盘，见 OnFormClosing
+            TrafficLight min = new TrafficLight(Color.FromArgb(254, 188, 46), TrafficLight.Glyph.Minimize)
+            { Left = 36, Top = top };
+            min.Click += delegate { WindowState = FormWindowState.Minimized; };
+            TrafficLight max = new TrafficLight(Color.FromArgb(40, 200, 64), TrafficLight.Glyph.Maximize)
+            { Left = 58, Top = top };
+            max.Click += delegate { ToggleMaximize(); };
+
+            titleLabel = new Label
+            {
+                Text = "DeepSeek Harness",
+                Dock = DockStyle.Fill,
+                TextAlign = ContentAlignment.MiddleCenter,
+                ForeColor = UI.Label,
+                Font = new Font(UI.FontName, 10f, FontStyle.Bold),
+                BackColor = Color.Transparent
+            };
+            portBadge = new Label
+            {
+                Text = "127.0.0.1:" + port,
+                AutoSize = true,
+                ForeColor = UI.LabelSecondary,
+                Font = new Font(UI.FontName, 8.5f),
+                BackColor = Color.Transparent
+            };
+
+            // 先加的在底层：标题铺满整条栏，交通灯与端口徽章浮在其上
+            titleBar.Controls.Add(titleLabel);
+            titleBar.Controls.Add(portBadge);
+            titleBar.Controls.Add(close);
+            titleBar.Controls.Add(min);
+            titleBar.Controls.Add(max);
+            titleBar.Resize += delegate { LayoutBadge(); };
+            Controls.Add(titleBar);
+            LayoutBadge();
+        }
+
+        private void LayoutBadge()
+        {
+            if (portBadge == null || titleBar == null || portBadge.IsDisposed) return;
+            portBadge.Top = (UI.TitleBarHeight - portBadge.Height) / 2;
+            portBadge.Left = Math.Max(90, titleBar.Width - portBadge.Width - 14);
+        }
+
+        // 端口可能在启动期回退（3080 被占用），确定后刷新右上角徽章
+        private void UpdatePortBadge()
+        {
+            if (portBadge == null || portBadge.IsDisposed) return;
+            portBadge.Text = "127.0.0.1:" + port;
+            LayoutBadge();
+        }
+
+        // 启动占位：iOS 风格的居中圆角卡片，避免白屏
+        private void BuildLoadingPlaceholder()
+        {
+            loadingCard = new Panel { Dock = DockStyle.Fill, BackColor = UI.WindowBg };
+
+            Panel card = new Panel { Size = new Size(440, 132), BackColor = UI.Card };
+            card.Region = MakeRoundedRegion(card.Width, card.Height, 28);
+            card.Paint += delegate (object s, PaintEventArgs e)
+            {
+                // Region 裁切后边缘有锯齿，用同色系描边补一圈，视觉更干净
+                e.Graphics.SmoothingMode = SmoothingMode.AntiAlias;
+                using (Pen p = new Pen(Color.FromArgb(232, 232, 237)))
+                using (GraphicsPath path = RoundedRectanglePath(
+                    new Rectangle(0, 0, card.Width - 1, card.Height - 1), 14))
+                    e.Graphics.DrawPath(p, path);
+            };
+
+            Label title = new Label
+            {
+                Text = "正在启动 DeepSeek Harness…",
+                Font = new Font(UI.FontName, 12f, FontStyle.Bold),
+                ForeColor = UI.Label,
+                Left = 20, Top = 30, Width = 400, Height = 28,
+                TextAlign = ContentAlignment.MiddleCenter,
+                BackColor = UI.Card
+            };
+            loadingText = new Label
+            {
+                Text = "首次启动需要几十秒，请稍候",
+                Font = new Font(UI.FontName, 9f),
+                ForeColor = UI.LabelSecondary,
+                Left = 20, Top = 68, Width = 400, Height = 24,
+                TextAlign = ContentAlignment.MiddleCenter,
+                BackColor = UI.Card
+            };
+
+            card.Controls.Add(title);
+            card.Controls.Add(loadingText);
+            loadingCard.Controls.Add(card);
+            loadingCard.Resize += delegate { CenterLoadingCard(card); };
+            Controls.Add(loadingCard);
+        }
+
+        private void CenterLoadingCard(Panel card)
+        {
+            card.Left = Math.Max(0, (loadingCard.Width - card.Width) / 2);
+            card.Top = Math.Max(0, (loadingCard.Height - card.Height) / 2);
+        }
+
+        private void SetLoadingText(string text)
+        {
+            try
+            {
+                if (loadingText != null && !loadingText.IsDisposed)
+                    loadingText.Text = text;
+            }
+            catch { }
+        }
+
+        private void RemoveLoadingPlaceholder()
+        {
+            if (loadingCard == null) return;
+            try { Controls.Remove(loadingCard); loadingCard.Dispose(); } catch { }
+            loadingCard = null;
+            loadingText = null;
+        }
+
+        private void ToggleMaximize()
+        {
+            if (WindowState == FormWindowState.Maximized)
+            {
+                WindowState = FormWindowState.Normal;
+            }
+            else
+            {
+                // 无边框最大化默认会盖住任务栏，限定在工作区范围内
+                try { MaximizedBounds = Screen.FromHandle(Handle).WorkingArea; } catch { }
+                WindowState = FormWindowState.Maximized;
+            }
+            ApplyCorners();
+        }
+
+        private void ApplyCorners()
+        {
+            if (!IsHandleCreated || IsDisposed) return;
+            if (WindowState == FormWindowState.Maximized)
+            {
+                if (!roundedByDwm) { try { Region = null; } catch { } }
+                return;
+            }
+            // Windows 11 用系统级圆角（无锯齿）；Windows 10 退化为 Region 裁切
+            if (!roundedByDwm)
+            {
+                try
+                {
+                    Version v = Environment.OSVersion.Version;
+                    bool win11 = v.Major > 10 || (v.Major == 10 && v.Build >= 22000);
+                    if (win11)
+                    {
+                        int pref = DWMWCP_ROUND;
+                        roundedByDwm = DwmSetWindowAttribute(
+                            Handle, DWMWA_WINDOW_CORNER_PREFERENCE, ref pref, 4) >= 0;
+                    }
+                }
+                catch { roundedByDwm = false; }
+            }
+            if (roundedByDwm) { try { Region = null; } catch { } return; }
+            ApplyRoundedRegion();
+        }
+
+        private void ApplyRoundedRegion()
+        {
+            try
+            {
+                System.Drawing.Region old = this.Region;
+                this.Region = MakeRoundedRegion(Width, Height, UI.CornerRadius * 2);
+                if (old != null) old.Dispose();
+            }
+            catch { }
+        }
+
+        private static Region MakeRoundedRegion(int w, int h, int diameter)
+        {
+            IntPtr rgn = CreateRoundRectRgn(0, 0, w + 1, h + 1, diameter, diameter);
+            Region r = Region.FromHrgn(rgn); // FromHrgn 会复制，原句柄可安全释放
+            DeleteObject(rgn);
+            return r;
+        }
+
+        private static GraphicsPath RoundedRectanglePath(Rectangle bounds, int radius)
+        {
+            int d = radius * 2;
+            GraphicsPath path = new GraphicsPath();
+            path.AddArc(bounds.X, bounds.Y, d, d, 180, 90);
+            path.AddArc(bounds.X + bounds.Width - d, bounds.Y, d, d, 270, 90);
+            path.AddArc(bounds.X + bounds.Width - d, bounds.Y + bounds.Height - d, d, d, 0, 90);
+            path.AddArc(bounds.X, bounds.Y + bounds.Height - d, d, d, 90, 90);
+            path.CloseFigure();
+            return path;
         }
 
         private async Task InitializeAsync()
@@ -148,6 +501,7 @@ namespace DeepSeekHarness
             {
                 string startUrl = await StartServerIfNeededAsync();
                 if (shuttingDown) return;
+                UpdatePortBadge();
                 await InitializeWebViewAsync(startUrl);
                 if (!string.IsNullOrEmpty(portNotice)) ShowBalloon(portNotice, ToolTipIcon.Info);
                 // 界面就绪后再静默查一次更新，有新版只在托盘提示，不打断使用
@@ -265,14 +619,19 @@ namespace DeepSeekHarness
                 view.CoreWebView2.Settings.AreDevToolsEnabled = false;
                 view.CoreWebView2.Settings.AreDefaultContextMenusEnabled = false;
                 view.CoreWebView2.Settings.IsStatusBarEnabled = false;
+                // 禁止误操作（Ctrl+滚轮 / 捏合）改变缩放导致网页重新栅格化后发虚
+                view.CoreWebView2.Settings.IsZoomControlEnabled = false;
+                // 白色底色，避免加载期闪一下黑底
+                view.DefaultBackgroundColor = Color.White;
                 view.CoreWebView2.NavigationCompleted += OnNavigationCompleted;
                 // startUrl 形如 http://127.0.0.1:3080/?token=xxx：
                 // 服务端校验 token 后写入会话 Cookie 并 303 跳转到干净的 /，之后一切正常。
                 view.Source = new Uri(startUrl);
 
-                // WebView 就绪，移除占位提示
-                if (statusLabel != null) { Controls.Remove(statusLabel); statusLabel.Dispose(); statusLabel = null; }
+                // WebView 就绪，移除启动占位卡片
+                RemoveLoadingPlaceholder();
                 webView = view;
+                BringGripsToFront(); // WebView 后加入会盖住边缘抓手，重新提到最上层
                 return null;
             }
             catch (Exception ex)
@@ -392,14 +751,9 @@ namespace DeepSeekHarness
                     throw new Exception("等待 dsh 服务就绪超时（90 秒）。" + ErrorTailText());
 
                 int waited = (int)((DateTime.UtcNow - start).TotalSeconds);
-                if (statusLabel != null && !statusLabel.IsDisposed)
-                {
-                    BeginInvoke(new Action(() =>
-                    {
-                        if (statusLabel != null && !statusLabel.IsDisposed)
-                            statusLabel.Text = "正在启动 DeepSeek Harness 本地服务…（已等待 " + waited + " 秒）";
-                    }));
-                }
+                int shown = waited; // 闭包里只能用常量，复制一份
+                BeginInvoke(new Action(() =>
+                    SetLoadingText("正在启动本地服务…（已等待 " + shown + " 秒）")));
                 await Task.Delay(500);
             }
         }
@@ -986,6 +1340,97 @@ namespace DeepSeekHarness
             // 最低可用版本：低于它的客户端被要求必须升级（最低版本本身不算必须升级）
             public string MinimumVersion = "";
             public bool Mandatory;
+        }
+    }
+
+    // 无边框窗口的边缘/角落缩放抓手：透明控件，按下时向所属窗体投递系统缩放命令
+    internal sealed class ResizeGrip : Control
+    {
+        private readonly Form owner;
+        private readonly int hitTest;
+        private const int WM_NCLBUTTONDOWN = 0x00A1;
+
+        public ResizeGrip(Form owner, int hitTest)
+        {
+            this.owner = owner;
+            this.hitTest = hitTest;
+            BackColor = Color.Transparent;
+            Cursor = CursorFor(hitTest);
+            SetStyle(ControlStyles.UserPaint | ControlStyles.AllPaintingInWmPaint |
+                     ControlStyles.OptimizedDoubleBuffer | ControlStyles.SupportsTransparentBackColor, true);
+        }
+
+        private static Cursor CursorFor(int hit)
+        {
+            if (hit == 12 || hit == 15) return Cursors.SizeNS;          // HTTOP / HTBOTTOM
+            if (hit == 10 || hit == 11) return Cursors.SizeWE;          // HTLEFT / HTRIGHT
+            if (hit == 13 || hit == 16) return Cursors.SizeNWSE;        // HTTOPLEFT / HTBOTTOMRIGHT
+            return Cursors.SizeNESW;                                    // HTTOPRIGHT / HTBOTTOMLEFT
+        }
+
+        protected override void OnMouseDown(MouseEventArgs e)
+        {
+            if (e.Button == MouseButtons.Left)
+            {
+                ReleaseCapture();
+                SendMessage(owner.Handle, WM_NCLBUTTONDOWN, (IntPtr)hitTest, IntPtr.Zero);
+            }
+            base.OnMouseDown(e);
+        }
+
+        [System.Runtime.InteropServices.DllImport("user32.dll")]
+        [return: System.Runtime.InteropServices.MarshalAs(System.Runtime.InteropServices.UnmanagedType.Bool)]
+        private static extern bool ReleaseCapture();
+
+        [System.Runtime.InteropServices.DllImport("user32.dll")]
+        private static extern IntPtr SendMessage(IntPtr hWnd, int msg, IntPtr wParam, IntPtr lParam);
+    }
+
+    // 窗口控制按钮：常态是纯色圆点，鼠标悬停时显示符号（macOS/iOS 交通灯）
+    internal sealed class TrafficLight : Control
+    {
+        internal enum Glyph { Close, Minimize, Maximize }
+
+        private readonly Color baseColor;
+        private readonly Glyph glyph;
+        private bool hover;
+
+        public TrafficLight(Color color, Glyph g)
+        {
+            baseColor = color;
+            glyph = g;
+            Size = new Size(13, 13);
+            BackColor = Color.Transparent;
+            Cursor = Cursors.Hand;
+            SetStyle(ControlStyles.UserPaint | ControlStyles.AllPaintingInWmPaint |
+                     ControlStyles.OptimizedDoubleBuffer | ControlStyles.SupportsTransparentBackColor, true);
+        }
+
+        protected override void OnMouseEnter(EventArgs e) { hover = true; Invalidate(); base.OnMouseEnter(e); }
+        protected override void OnMouseLeave(EventArgs e) { hover = false; Invalidate(); base.OnMouseLeave(e); }
+
+        protected override void OnPaint(PaintEventArgs e)
+        {
+            Graphics g = e.Graphics;
+            g.SmoothingMode = SmoothingMode.AntiAlias;
+            using (SolidBrush b = new SolidBrush(hover ? Darken(baseColor) : baseColor))
+                g.FillEllipse(b, 0, 0, Width - 1, Height - 1);
+
+            if (!hover) return;
+            string symbol = glyph == Glyph.Close ? "×" : (glyph == Glyph.Minimize ? "–" : "+");
+            using (Font f = new Font(UI.FontName, 7.5f, FontStyle.Bold))
+            using (SolidBrush b = new SolidBrush(Color.FromArgb(110, 0, 0, 0)))
+            using (StringFormat sf = new StringFormat
+            { Alignment = StringAlignment.Center, LineAlignment = StringAlignment.Center })
+            {
+                RectangleF r = new RectangleF(0, glyph == Glyph.Minimize ? -1.5f : 0, Width, Height);
+                g.DrawString(symbol, f, b, r, sf);
+            }
+        }
+
+        private static Color Darken(Color c)
+        {
+            return Color.FromArgb((int)(c.R * 0.82), (int)(c.G * 0.82), (int)(c.B * 0.82));
         }
     }
 

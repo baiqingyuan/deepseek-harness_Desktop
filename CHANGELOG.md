@@ -2,6 +2,21 @@
 
 本项目所有重要改动记录于此。格式参考 [Keep a Changelog](https://keepachangelog.com/)，版本号遵循 [语义化版本](https://semver.org/lang/zh-CN/)。
 
+## [0.7.0] - 2026-09-18
+
+> 界面重做为 iOS 风格，并修掉了高 DPI 屏幕上整个界面发虚的问题。
+
+### 修复 (Fixed)
+- **高 DPI 下界面模糊（画质）**：exe 此前没有声明 DPI 感知，Windows 在 125%/150% 缩放下会对整个窗口做位图拉伸（DWM 虚拟化），导致界面与 WebView2 里的网页内容一起发虚。现在嵌入 `src/app.manifest` 声明 `PerMonitorV2`，并在启动时调用 `Application.SetHighDpiMode(PerMonitorV2)`（反射探测，兼容旧版 .NET Framework），由应用按设备像素渲染，文字与网页恢复锐利。
+- **禁止误缩放**：关闭 WebView2 的缩放控制（Ctrl+滚轮/捏合），避免网页被重新栅格化后变模糊；底色固定为白色，去掉加载期的黑底闪烁。
+
+### 变更 (Changed)
+- **iOS 风格窗口**：移除系统标题栏，改为自绘 iOS 导航栏 —— 44px 浅色栏 + 1px 分隔线 + 居中标题 + 右侧本地端口徽章；左侧 macOS/iOS 交通灯按钮（关闭 / 最小化 / 最大化，悬停显示符号）。配色取自 Apple System Colors（`systemGray6` 底、`systemBlue` 强调、iOS 标准文字与分隔色），字体统一为 Segoe UI。
+- **圆角与阴影**：Windows 11 用系统级圆角（DWM，无锯齿），Windows 10 退化为 Region 裁切；无边框窗口补上投影（`CS_DROPSHADOW`）。最大化时自动去掉圆角并限制在工作区内，不遮挡任务栏。
+- **启动占位改卡片**：等待服务时显示居中圆角白卡片（主标题 + 秒数提示），替代原来的居中纯文字。
+- **窗口缩放**：无边框后系统不再提供边缘热区，改用 8 个贴边透明抓手（4 边 + 4 角）投递系统缩放命令。之所以不在 `WndProc` 里处理 `WM_NCHITTEST`：WebView2 覆盖整个客户区，鼠标落在子窗口时该消息不会派发到窗体。
+- 窗口最小尺寸 760×560；关闭按钮保持原有语义（最小化到托盘，服务继续运行）。
+
 ## [0.6.0] - 2026-09-18
 
 > 更新检查改为读取随 Release 发布的静态清单 `latest.json`，彻底摆脱 GitHub API 的匿名限流；并支持「最低可用版本」强制升级。
