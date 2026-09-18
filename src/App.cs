@@ -232,8 +232,14 @@ namespace DeepSeekHarness
         private bool navWarned;
         private NotifyIcon trayIcon;
         private bool trayExit;
-        // 最近一次查到的可用更新（启动时静默检查发现后，点托盘气泡即可升级）
+        // 最近一次查到的可用更新（启动时静默检查发现后，点托盘气泡或界面按钮即可升级）
         private UpdateInfo pendingUpdate;
+        // 更新流程状态：会同步给网页里的左下角更新按钮（idle/available/downloading/ready…）
+        private string updatePhase = "idle";
+        private int updatePercent;
+        private bool updateBusy;
+        private string downloadedInstaller;
+        private string downloadedVersion;
         // 首选静态清单 latest.json（由 CI 随 Release 上传）。它走的是 release 资源下载域名，
         // 不受 GitHub API 匿名限流（60 次/小时/IP）影响——同一出口 IP 下多人使用也能拿到更新。
         private const string UpdateManifestUrl =
@@ -243,6 +249,129 @@ namespace DeepSeekHarness
             "https://api.github.com/repos/baiqingyuan/deepseek-harness_Desktop/releases/latest";
         private const string ReleasesPageUrl =
             "https://github.com/baiqingyuan/deepseek-harness_Desktop/releases";
+
+        // 注入到 dsh 网页里的「桌面更新」脚本：
+        // 1) 挂一个左下角更新按钮（优先塞进设置按钮所在行，即设置按钮右侧；找不到就浮在左下角）；
+        // 2) 同时暴露官方 dsh 0.1.6+ 约定的 window.dshDesktop 更新桥接，
+        //    将来升级 dsh 后由官方界面自己渲染按钮，本脚本会自动隐藏、不重复。
+        // 全部使用单引号，便于直接放进 C# 的逐字字符串。
+        private const string UpdateBridgeScript = @"
+(function(){
+ if (window.__dshUpdateReady) return;
+ if (window.top !== window) return;
+ window.__dshUpdateReady = true;
+ var BTN = 'dsh-desktop-update-btn';
+ var listeners = [];
+ var state = {phase:'idle'};
+ function label(s){
+  if(s.phase==='checking') return '检查更新…';
+  if(s.phase==='available') return '新版本' + (s.version ? ' v'+s.version : '');
+  if(s.phase==='downloading') return '下载中 ' + (s.percent||0) + '%';
+  if(s.phase==='ready') return '安装并重启';
+  if(s.phase==='installing') return '正在安装…';
+  if(s.phase==='uptodate') return '已是最新版';
+  if(s.phase==='error') return '重试更新';
+  return '检查更新';
+ }
+ function busy(s){ return s.phase==='checking'||s.phase==='downloading'||s.phase==='installing'; }
+ function render(){
+  for (var i=0;i<listeners.length;i++){ try{listeners[i](state);}catch(e){} }
+  var b = document.getElementById(BTN);
+  if(!b) return;
+  var t = label(state);
+  b.textContent = t;
+  b.setAttribute('aria-label', t);
+  if(busy(state)) b.setAttribute('data-busy','1'); else b.removeAttribute('data-busy');
+  if(state.phase==='error') b.setAttribute('data-error','1'); else b.removeAttribute('data-error');
+  if(state.phase==='idle') b.setAttribute('data-idle','1'); else b.removeAttribute('data-idle');
+ }
+ function send(){ try{ window.chrome.webview.postMessage('dsh-update-open'); }catch(e){} }
+ function style(){
+  if(document.getElementById('dsh-desktop-update-css')) return;
+  var st=document.createElement('style');
+  st.id='dsh-desktop-update-css';
+  st.textContent='#'+BTN+'{position:fixed;left:12px;bottom:12px;z-index:2147483000;display:inline-flex;align-items:center;height:28px;padding:0 10px;margin:0;border:1px solid rgba(128,128,128,0.22);border-radius:8px;background:rgba(128,128,128,0.12);color:inherit;font-family:inherit;font-size:12px;line-height:1;white-space:nowrap;cursor:pointer;backdrop-filter:blur(6px);}'
+   +'#'+BTN+':hover{background:rgba(128,128,128,0.22);}'
+   +'#'+BTN+'[data-idle]{opacity:.5;}'
+   +'#'+BTN+'[data-busy]{cursor:progress;opacity:.8;}'
+   +'#'+BTN+'[data-error]{border-color:#E81123;color:#E81123;opacity:1;}';
+  (document.head||document.documentElement).appendChild(st);
+ }
+ function build(){
+  var b=document.getElementById(BTN);
+  if(b) return b;
+  b=document.createElement('button');
+  b.id=BTN; b.type='button'; b.textContent='检查更新';
+  b.addEventListener('click', function(){ if(b.getAttribute('data-busy')) return; send(); });
+  document.body.appendChild(b);
+  return b;
+ }
+ function sidebar(){
+  var cands=document.querySelectorAll('aside,nav,[class*=sidebar],[class*=Sidebar]');
+  var best=null,bestH=0;
+  for(var i=0;i<cands.length;i++){
+   var r=cands[i].getBoundingClientRect();
+   if(r.left<60 && r.width>120 && r.width<560 && r.height>300 && r.height>bestH){best=cands[i];bestH=r.height;}
+  }
+  return best;
+ }
+ function settingsBtn(){
+  var cands=document.querySelectorAll('button,a,[role=button],[aria-label]');
+  var best=null,bestTop=-1;
+  for(var i=0;i<cands.length;i++){
+   var el=cands[i];
+   if(el.id===BTN) continue;
+   var r=el.getBoundingClientRect();
+   if(r.width<8||r.height<8) continue;
+   if(r.left>320 || r.top < window.innerHeight*0.5) continue;
+   var txt=(el.getAttribute('aria-label')||'')+' '+(el.getAttribute('title')||'')+' '+(el.textContent||'');
+   if(!/设置|Settings|偏好|Preferences|账户|Account/.test(txt)) continue;
+   if(r.top>bestTop){best=el;bestTop=r.top;}
+  }
+  return best;
+ }
+ function place(){
+  var b=build();
+  var s=settingsBtn();
+  if(s && s.parentElement && s.parentElement!==document.body){
+   var row=s.parentElement;
+   if(row.lastElementChild!==b){ row.appendChild(b); }
+   b.style.position='static'; b.style.left='auto'; b.style.bottom='auto'; b.style.marginLeft='4px';
+   return b;
+  }
+  var sb=sidebar();
+  b.style.position='fixed'; b.style.marginLeft='0'; b.style.bottom='12px';
+  if(sb) b.style.left=(sb.getBoundingClientRect().left+10)+'px'; else b.style.left='12px';
+  return b;
+ }
+ function hasNative(){
+  var els=document.querySelectorAll('[aria-label]');
+  for(var i=0;i<els.length;i++){
+   if(els[i].id===BTN) continue;
+   var a=els[i].getAttribute('aria-label');
+   if(a && /^(新版本|Update|安装并重启|Install and Restart|重试更新|Retry update|下载中)/.test(a)) return true;
+  }
+  return false;
+ }
+ function tick(){
+  var b=document.getElementById(BTN);
+  if(!b || !b.isConnected){ style(); b=place(); }
+  b.style.display = hasNative() ? 'none' : 'inline-flex';
+  render();
+ }
+ function boot(){ style(); place(); render(); setInterval(tick,1500);
+  try{ new MutationObserver(tick).observe(document.documentElement,{childList:true,subtree:true}); }catch(e){} }
+ window.__dshDesktopUpdate=function(s){ state=s||{phase:'idle'}; render(); };
+ if(!window.dshDesktop){
+  window.dshDesktop={protocolVersion:1,updates:{
+   status:function(){ return Promise.resolve(state); },
+   open:function(){ send(); return Promise.resolve(); },
+   subscribe:function(l){ listeners.push(l); return function(){ var i=listeners.indexOf(l); if(i>=0) listeners.splice(i,1); }; }
+  }};
+ }
+ if(document.body) boot(); else document.addEventListener('DOMContentLoaded', boot);
+})();
+";
 
         [System.Runtime.InteropServices.DllImport("user32.dll")]
         [return: System.Runtime.InteropServices.MarshalAs(System.Runtime.InteropServices.UnmanagedType.Bool)]
@@ -278,6 +407,8 @@ namespace DeepSeekHarness
             // 无边框 + 自绘标题栏（系统标题栏无法与应用内容统一配色）
             FormBorderStyle = FormBorderStyle.None;
             AutoScaleMode = AutoScaleMode.Dpi;
+            // 无边框自绘窗口整体双缓冲，缩放/重绘时不再闪
+            DoubleBuffered = true;
             Font = UI.MakeFont(9f);
             try { Icon = Icon.ExtractAssociatedIcon(Application.ExecutablePath); } catch { }
 
@@ -526,12 +657,13 @@ namespace DeepSeekHarness
             LayoutChrome();
         }
 
-        // 启动占位：居中的扁平卡片 + 走马灯进度条，避免启动期白屏
+        // 启动占位：居中的扁平卡片 + 走马灯进度条，避免启动期白屏。
+        // 用双缓冲面板：启动期每 500ms 会刷新一次等待文案，普通 Panel 会明显闪烁。
         private void BuildLoadingPlaceholder()
         {
-            loadingCard = new Panel { Dock = DockStyle.Fill, BackColor = UI.WindowBg };
+            loadingCard = new BufferedPanel { Dock = DockStyle.Fill, BackColor = UI.WindowBg };
 
-            Panel card = new Panel { Size = new Size(420, 156), BackColor = UI.Card };
+            Panel card = new BufferedPanel { Size = new Size(420, 156), BackColor = UI.Card };
             card.Paint += delegate (object s, PaintEventArgs e)
             {
                 using (Pen p = new Pen(UI.Border))
@@ -626,13 +758,19 @@ namespace DeepSeekHarness
         {
             try
             {
-                string startUrl = await StartServerIfNeededAsync();
+                // 启动提速的关键：本地服务启动与 WebView2 运行时初始化同时进行。
+                // 以前是「等服务就绪 → 再初始化 WebView2」串行走，白白多花 1-3 秒，
+                // 而且 WebView2 的初始化压在 UI 线程上，正是启动进度条卡顿的来源。
+                Task<string> serverTask = StartServerIfNeededAsync();
+                Task<CoreWebView2Environment> envTask = PrepareWebViewEnvironmentAsync();
+
+                string startUrl = await serverTask;
                 if (shuttingDown) return;
                 UpdatePortBadge();
-                await InitializeWebViewAsync(startUrl);
+                await InitializeWebViewAsync(startUrl, envTask);
                 if (!string.IsNullOrEmpty(portNotice)) ShowBalloon(portNotice, ToolTipIcon.Info);
-                // 界面就绪后再静默查一次更新，有新版只在托盘提示，不打断使用
-                await SilentUpdateCheckAsync();
+                // 界面就绪后再静默查一次更新，有新版只在左下角按钮提示，不打断使用
+                await RunUpdateFlowAsync(false);
             }
             catch (Exception ex)
             {
@@ -647,8 +785,29 @@ namespace DeepSeekHarness
             }
         }
 
+        // 提前把 WebView2 运行时拉起来（与服务启动并行），拿到环境后等真正建控件时再 attach
+        private async Task<CoreWebView2Environment> PrepareWebViewEnvironmentAsync()
+        {
+            try
+            {
+                if (!IsWebView2RuntimeAvailable()) return null;
+                return await CoreWebView2Environment.CreateAsync(null, WebViewUserDataDir, null);
+            }
+            catch { return null; }
+        }
+
+        private static string WebViewUserDataDir
+        {
+            get
+            {
+                return Path.Combine(
+                    Environment.GetFolderPath(Environment.SpecialFolder.LocalApplicationData),
+                    "DeepSeekHarness", "EBWebView");
+            }
+        }
+
         // WebView2 初始化（带重试：偶发 E_ABORT，多为上一次实例未完全退出导致，稍候重试即可）
-        private async Task InitializeWebViewAsync(string startUrl)
+        private async Task InitializeWebViewAsync(string startUrl, Task<CoreWebView2Environment> envTask)
         {
             // 运行前先确认 WebView2 运行时已安装；缺失则引导用户一键安装后再继续。
             if (!IsWebView2RuntimeAvailable())
@@ -667,10 +826,25 @@ namespace DeepSeekHarness
             Exception last = null;
             for (int attempt = 1; attempt <= 3; attempt++)
             {
-                Exception ex = await TryCreateWebViewAsync(startUrl);
-                if (ex == null) return;
-                last = ex;
-                if (attempt < 3) await Task.Delay(2000 * attempt);
+                try
+                {
+                    CoreWebView2Environment env = null;
+                    if (envTask != null)
+                    {
+                        try { env = await envTask; }
+                        catch { env = null; }
+                    }
+                    if (env == null)
+                        env = await CoreWebView2Environment.CreateAsync(null, WebViewUserDataDir, null);
+                    await AttachWebViewAsync(startUrl, env);
+                    return;
+                }
+                catch (Exception ex)
+                {
+                    last = ex;
+                    envTask = null; // 环境创建失败过一次，下次重新建
+                    if (attempt < 3) await Task.Delay(2000 * attempt);
+                }
             }
             throw last;
         }
@@ -728,8 +902,8 @@ namespace DeepSeekHarness
             }
         }
 
-        // 成功返回 null；失败返回异常并清理控件
-        private async Task<Exception> TryCreateWebViewAsync(string startUrl)
+        // 建好 WebView2 控件并加载界面；失败抛异常并清理控件
+        private async Task AttachWebViewAsync(string startUrl, CoreWebView2Environment env)
         {
             WebView2 view = null;
             try
@@ -737,11 +911,15 @@ namespace DeepSeekHarness
                 view = new WebView2 { Dock = DockStyle.Fill };
                 Controls.Add(view);
 
-                string userData = Path.Combine(
-                    Environment.GetFolderPath(Environment.SpecialFolder.LocalApplicationData),
-                    "DeepSeekHarness", "EBWebView");
-                CoreWebView2Environment env = await CoreWebView2Environment.CreateAsync(null, userData, null);
                 await view.EnsureCoreWebView2Async(env);
+
+                // 网页里的「左下角更新按钮」：每个文档创建时都注入，刷新/跳转后依然在
+                try
+                {
+                    view.CoreWebView2.AddScriptToExecuteOnDocumentCreated(UpdateBridgeScript);
+                    view.CoreWebView2.WebMessageReceived += OnWebMessageReceived;
+                }
+                catch { }
 
                 view.CoreWebView2.Settings.AreDevToolsEnabled = false;
                 view.CoreWebView2.Settings.AreDefaultContextMenusEnabled = false;
@@ -759,14 +937,46 @@ namespace DeepSeekHarness
                 RemoveLoadingPlaceholder();
                 webView = view;
                 BringGripsToFront(); // WebView 后加入会盖住边缘抓手，重新提到最上层
-                return null;
+                // 当前状态立刻同步一次：若启动时已静默查到新版本，按钮一出现就是「新版本」
+                PublishUpdateState(updatePhase, updatePercent, pendingUpdate == null ? "" : pendingUpdate.Version, true);
             }
-            catch (Exception ex)
+            catch
             {
                 try { if (view != null) { Controls.Remove(view); view.Dispose(); } } catch { }
                 webView = null;
-                return ex;
+                throw;
             }
+        }
+
+        // 网页里的更新按钮被点击（window.chrome.webview.postMessage('dsh-update-open')）
+        private void OnWebMessageReceived(object sender, CoreWebView2WebMessageReceivedEventArgs e)
+        {
+            try
+            {
+                string msg = e.TryGetWebMessageAsString();
+                if (string.IsNullOrEmpty(msg) || msg.IndexOf("dsh-update-open", StringComparison.Ordinal) < 0) return;
+            }
+            catch { return; }
+            if (IsDisposed) return;
+            BeginInvoke(new Action(() => { Task ignored = OnUpdateOpenAsync(); }));
+        }
+
+        private async Task OnUpdateOpenAsync()
+        {
+            if (updateBusy) return;
+            // 已经下载好：这一下就是「安装并重启」——关掉自己，静默安装，装完由安装包拉起
+            if (!string.IsNullOrEmpty(downloadedInstaller) && File.Exists(downloadedInstaller))
+            {
+                await InstallAndRestartAsync();
+                return;
+            }
+            // 已经查到新版本：直接开下
+            if (pendingUpdate != null)
+            {
+                await DownloadUpdateAsync(pendingUpdate, pendingUpdate.Mandatory);
+                return;
+            }
+            await RunUpdateFlowAsync(true);
         }
 
         private void OnNavigationCompleted(object sender, CoreWebView2NavigationCompletedEventArgs e)
@@ -783,12 +993,20 @@ namespace DeepSeekHarness
         // 启动本地 dsh Web 服务，返回本次可直接访问的起始 URL（带一次性 token）。
         private async Task<string> StartServerIfNeededAsync()
         {
+            // 端口探测、WMI 查残留进程、启动 node 全都是阻塞操作。以前它们跑在 UI 线程上，
+            // 和 WebView2 初始化挤在一起，正是启动动画一卡一卡的来源；现在丢到后台线程。
+            await Task.Run(new Action(PrepareAndLaunchServer));
+            return await WaitForReadyUrlAsync();
+        }
+
+        // 后台线程：端口检查 → 清理上一轮残留 → 拉起 dsh 服务进程
+        private void PrepareAndLaunchServer()
+        {
             // 端口已被占用：先尝试停掉"本目录 dsh"的残留进程再重新拉起，
             // 因为新版 dsh 需要本次进程的一次性 token，接管旧进程拿不到。
             if (IsPortOpen(port))
             {
-                bool stopped = await StopOwnedServerAsync();
-                if (!stopped)
+                if (!StopOwnedServer())
                 {
                     // 3080 被别的程序占用时不再直接放弃启动：换一个空闲端口继续，
                     // 只在托盘提示一次，减少「打不开」这类求助。
@@ -802,6 +1020,11 @@ namespace DeepSeekHarness
             if (!File.Exists(dshPath))
                 throw new Exception("程序目录缺少 dsh 依赖（node_modules/@deepseek-ai/dsh），请下载完整的发布包后重试。\n详见 GitHub Releases 页面。");
 
+            LaunchServerProcess();
+        }
+
+        private void LaunchServerProcess()
+        {
             ProcessStartInfo psi = new ProcessStartInfo();
             psi.FileName = nodePath;
             // --no-open：不额外打开系统默认浏览器（界面由本窗口承载）
@@ -845,8 +1068,6 @@ namespace DeepSeekHarness
             // dsh 崩溃或被拦截时给个提示，避免用户对着一个已经失效的界面发呆。
             serverProc.EnableRaisingEvents = true;
             serverProc.Exited += OnServerExited;
-
-            return await WaitForReadyUrlAsync();
         }
 
         // 从 stdout 抓取形如 "dsh web: http://127.0.0.1:3080/?token=xxx (LAN: ...)" 的就绪行。
@@ -871,7 +1092,7 @@ namespace DeepSeekHarness
                     throw new Exception("dsh 服务进程已退出。" + ErrorTailText());
                 if (readyUrlSource.Task.IsCompleted) return readyUrlSource.Task.Result;
 
-                bool open = IsPortOpen(port);
+                bool open = await Task.Run(() => IsPortOpen(port));
                 if (open && portOpenAt == DateTime.MinValue) portOpenAt = DateTime.UtcNow;
                 if (open && portOpenAt != DateTime.MinValue &&
                     DateTime.UtcNow - portOpenAt > TimeSpan.FromSeconds(10))
@@ -913,14 +1134,15 @@ namespace DeepSeekHarness
         }
 
         // 找到并停掉"本目录 dsh"残留的服务进程（例如上次异常退出遗留的 node.exe）。
-        private async Task<bool> StopOwnedServerAsync()
+        // 同步版本：只在后台线程调用（里面有 WMI 查询与睡眠等待）。
+        private bool StopOwnedServer()
         {
             int pid = FindOwnedServerPid();
             if (pid <= 0) return false;
             KillProcessTree(pid);
             for (int i = 0; i < 24; i++)
             {
-                await Task.Delay(500);
+                Thread.Sleep(500);
                 if (!IsPortOpen(port)) return true;
             }
             return !IsPortOpen(port);
@@ -1032,7 +1254,7 @@ namespace DeepSeekHarness
                 if (pendingUpdate != null)
                 {
                     UpdateInfo info = pendingUpdate;
-                    Task ignored = PromptUpdateAsync(info);
+                    Task ignored = DownloadUpdateAsync(info, info.Mandatory);
                 }
                 else ShowForm();
             };
@@ -1044,7 +1266,7 @@ namespace DeepSeekHarness
             var open = new ToolStripMenuItem("显示主界面");
             open.Click += (s, ev) => ShowForm();
             var update = new ToolStripMenuItem("检查更新…");
-            update.Click += async (s, ev) => await CheckForUpdatesAsync(true);
+            update.Click += async (s, ev) => await RunUpdateFlowAsync(true);
             var releases = new ToolStripMenuItem("打开下载页面");
             releases.Click += (s, ev) => OpenReleasesPage();
             var about = new ToolStripMenuItem("关于 / 版本 v" + AppInfo.Version);
@@ -1176,7 +1398,7 @@ namespace DeepSeekHarness
             catch { }
         }
 
-        // ---------- 更新检查与升级 ----------
+        // ---------- 本地服务停止 ----------
 
         // 停掉本地 dsh 服务并释放进程句柄（关窗、安装更新前都会走这里）
         private void StopServer()
@@ -1203,81 +1425,121 @@ namespace DeepSeekHarness
             serverProc = null;
         }
 
-        // 启动时静默检查一次：失败一律静默，有新版只在托盘提示
-        private async Task SilentUpdateCheckAsync()
+        // ---------- 更新检查与升级 ----------
+
+        // 网页里的左下角更新按钮是否已生效（注入脚本 + WebView2 就绪）
+        private bool WebUpdateUi
         {
-            try
-            {
-                UpdateInfo info = await FetchLatestReleaseAsync();
-                if (info == null) return;
-                if (!IsNewerVersion(info.Version, AppInfo.Version)) return;
-                pendingUpdate = info;
-                // 低于最低可用版本：直接弹窗要求升级，不能只靠气泡（用户可能根本不点）
-                if (info.Mandatory)
-                {
-                    await PromptUpdateAsync(info);
-                    return;
-                }
-                ShowBalloon("发现新版本 v" + info.Version + "，点击此处升级（或右键托盘选「检查更新…」）。",
-                    ToolTipIcon.Info);
-            }
-            catch { }
+            get { return webView != null && webView.CoreWebView2 != null; }
         }
 
-        // 用户主动检查：无论结果都给出反馈
-        private async Task CheckForUpdatesAsync(bool userInitiated)
+        // 把更新状态推给网页里的按钮：
+        // idle / checking / available / downloading / ready / installing / uptodate / error
+        private void PublishUpdateState(string phase, int percent, string version, bool force)
         {
+            if (IsDisposed) return;
+            if (InvokeRequired)
+            {
+                try { BeginInvoke(new Action(() => PublishUpdateState(phase, percent, version, force))); }
+                catch { }
+                return;
+            }
+            bool changed = force || phase != updatePhase || percent != updatePercent;
+            updatePhase = phase;
+            updatePercent = percent;
+            if (!changed || !WebUpdateUi) return;
+
+            string v = string.IsNullOrEmpty(version)
+                ? "null"
+                : "\"" + version.Replace("\\", "\\\\").Replace("\"", "\\\"") + "\"";
+            string js = "if(window.__dshDesktopUpdate)window.__dshDesktopUpdate({phase:'" +
+                        phase + "',percent:" + percent + ",version:" + v + "});";
+            try { webView.ExecuteScriptAsync(js); } catch { }
+        }
+
+        // 统一的更新流程：检查 → 下载 → 界面上点「安装并重启」→ 关闭自己静默安装 → 装完自动拉起。
+        // userInitiated=false 用于启动时的静默检查，只在左下角挂个「新版本」，不打断使用。
+        private async Task RunUpdateFlowAsync(bool userInitiated)
+        {
+            if (updateBusy) return;
+            updateBusy = true;
             try
             {
+                PublishUpdateState("checking", 0, "", false);
                 UpdateInfo info = await FetchLatestReleaseAsync();
                 if (info == null)
                 {
-                    if (userInitiated)
+                    PublishUpdateState("error", 0, "", true);
+                    if (userInitiated && !WebUpdateUi)
                         MessageBox.Show("暂时无法获取更新信息，请稍后重试，或到 GitHub Releases 页面手动下载。",
                             "检查更新", MessageBoxButtons.OK, MessageBoxIcon.Warning);
                     return;
                 }
+
                 if (!IsNewerVersion(info.Version, AppInfo.Version))
                 {
+                    pendingUpdate = null;
                     if (userInitiated)
-                        MessageBox.Show("当前已是最新版本（v" + AppInfo.Version + "）。",
-                            "检查更新", MessageBoxButtons.OK, MessageBoxIcon.Information);
+                    {
+                        if (WebUpdateUi)
+                        {
+                            PublishUpdateState("uptodate", 0, info.Version, true);
+                            await Task.Delay(2500);
+                            PublishUpdateState("idle", 0, "", true);
+                        }
+                        else
+                        {
+                            MessageBox.Show("当前已是最新版本（v" + AppInfo.Version + "）。",
+                                "检查更新", MessageBoxButtons.OK, MessageBoxIcon.Information);
+                        }
+                    }
+                    else PublishUpdateState("idle", 0, "", false);
                     return;
                 }
+
                 pendingUpdate = info;
-                await PromptUpdateAsync(info);
+                // 低于最低可用版本：必须弹窗告知并强制升级，不能只靠按钮（用户可能根本不看）
+                if (info.Mandatory)
+                {
+                    if (!ConfirmUpdate(info)) { PublishUpdateState("available", 0, info.Version, true); return; }
+                }
+                else if (!userInitiated)
+                {
+                    PublishUpdateState("available", 0, info.Version, true);
+                    if (!WebUpdateUi)
+                        ShowBalloon("发现新版本 v" + info.Version + "，点此升级（或右键托盘选「检查更新…」）。",
+                            ToolTipIcon.Info);
+                    return;
+                }
+
+                await DownloadUpdateAsync(info, info.Mandatory);
             }
             catch (Exception ex)
             {
-                if (userInitiated)
+                PublishUpdateState("error", 0, "", true);
+                if (userInitiated && !WebUpdateUi)
                     MessageBox.Show("检查更新失败：" + ex.Message, "检查更新",
                         MessageBoxButtons.OK, MessageBoxIcon.Warning);
             }
+            finally { updateBusy = false; }
         }
 
-        // 展示更新说明并询问是否下载升级
-        private async Task PromptUpdateAsync(UpdateInfo info)
+        // 强制升级时的确认弹窗（普通升级不弹窗，走界面按钮）
+        private bool ConfirmUpdate(UpdateInfo info)
         {
-            string notes = info.Notes;
+            string notes = info.Notes ?? "";
             if (notes.Length > 600) notes = notes.Substring(0, 600) + "…";
-            string head = info.Mandatory
-                ? "当前版本 v" + AppInfo.Version + " 已停用，建议升级到 v" + info.Version + " 或更高版本。\r\n\r\n"
-                : "发现新版本 v" + info.Version + "（当前 v" + AppInfo.Version + "）\r\n\r\n";
-            string tail = info.Mandatory
-                ? "是否现在下载安装包并升级？\r\n（约 50 MB，下载后会关闭本应用并启动安装程序；\r\n选择「否」可稍后升级，但每次启动都会提醒）"
-                : "是否现在下载安装包并升级？\r\n（约 50 MB，下载后会关闭本应用并启动安装程序）";
             DialogResult r = MessageBox.Show(
-                head +
-                (string.IsNullOrEmpty(notes) ? "" : notes + "\r\n\r\n") + tail,
-                "DeepSeek Harness 更新",
-                MessageBoxButtons.YesNo,
-                info.Mandatory ? MessageBoxIcon.Warning : MessageBoxIcon.Information);
-            if (r != DialogResult.Yes) return;
-            await DownloadAndInstallAsync(info);
+                "当前版本 v" + AppInfo.Version + " 已停用，需要升级到 v" + info.Version + " 或更高版本。\r\n\r\n" +
+                (string.IsNullOrEmpty(notes) ? "" : notes + "\r\n\r\n") +
+                "是否现在下载并升级？\r\n（下载完成后会自动关闭应用、静默覆盖安装，装好自动重新打开）",
+                "DeepSeek Harness 更新", MessageBoxButtons.YesNo, MessageBoxIcon.Warning);
+            return r == DialogResult.Yes;
         }
 
-        // 下载安装包（带进度），完成后询问是否立即安装
-        private async Task DownloadAndInstallAsync(UpdateInfo info)
+        // 下载安装包：进度直接显示在左下角按钮上（"下载中 42%"），
+        // 没有网页按钮时退回独立的进度窗口。
+        private async Task DownloadUpdateAsync(UpdateInfo info, bool autoInstall)
         {
             if (string.IsNullOrEmpty(info.InstallerUrl))
             {
@@ -1292,8 +1554,9 @@ namespace DeepSeekHarness
             Directory.CreateDirectory(dir);
             string file = Path.Combine(dir, "DeepSeekHarness-Setup-" + info.Version + ".exe");
 
-            ProgressForm progress = new ProgressForm("正在下载更新 v" + info.Version);
-            progress.Show(this);
+            PublishUpdateState("downloading", 0, info.Version, true);
+            ProgressForm progress = WebUpdateUi ? null : new ProgressForm("正在下载更新 v" + info.Version);
+            if (progress != null) progress.Show(this);
             try
             {
                 using (WebClient wc = new WebClient())
@@ -1301,8 +1564,10 @@ namespace DeepSeekHarness
                     wc.Headers.Add("User-Agent", "DeepSeekHarness-Desktop/" + AppInfo.Version);
                     wc.DownloadProgressChanged += delegate (object s, DownloadProgressChangedEventArgs ev)
                     {
-                        progress.UpdateProgress(ev.ProgressPercentage,
-                            FormatSize(ev.BytesReceived), FormatSize(ev.TotalBytesToReceive));
+                        PublishUpdateState("downloading", ev.ProgressPercentage, info.Version, false);
+                        if (progress != null)
+                            progress.UpdateProgress(ev.ProgressPercentage,
+                                FormatSize(ev.BytesReceived), FormatSize(ev.TotalBytesToReceive));
                     };
                     TaskCompletionSource<object> done = new TaskCompletionSource<object>();
                     wc.DownloadFileCompleted += delegate (object s, System.ComponentModel.AsyncCompletedEventArgs ev)
@@ -1316,25 +1581,47 @@ namespace DeepSeekHarness
             }
             finally
             {
-                progress.Close();
-                progress.Dispose();
+                if (progress != null) { progress.Close(); progress.Dispose(); }
             }
 
-            DialogResult r = MessageBox.Show(
-                "更新 v" + info.Version + " 已下载完成。\r\n\r\n是否立即关闭应用并安装？\r\n" +
-                "（安装程序会覆盖更新到原安装目录，配置与会话不会丢失）",
-                "DeepSeek Harness 更新", MessageBoxButtons.YesNo, MessageBoxIcon.Question);
-            if (r != DialogResult.Yes)
+            downloadedInstaller = file;
+            downloadedVersion = info.Version;
+            PublishUpdateState("ready", 100, info.Version, true);
+            // 强制升级不再等用户点：直接走完「关闭 → 静默安装 → 自动重开」
+            if (autoInstall)
             {
-                MessageBox.Show("安装包已保存，可稍后手动运行：\r\n" + file,
-                    "DeepSeek Harness 更新", MessageBoxButtons.OK, MessageBoxIcon.Information);
+                await Task.Delay(800);
+                await InstallAndRestartAsync();
+            }
+        }
+
+        // 关闭应用 → 静默覆盖安装 → 由安装包成功后自行拉起新版。
+        // 全程不弹出 NSIS 安装向导（/S），与主流桌面 Agent 的「安装并重启」一致。
+        private async Task InstallAndRestartAsync()
+        {
+            string file = downloadedInstaller;
+            if (string.IsNullOrEmpty(file) || !File.Exists(file)) return;
+
+            PublishUpdateState("installing", 100, downloadedVersion, true);
+            await Task.Delay(300);
+
+            shuttingDown = true;
+            trayExit = true;
+            try { if (trayIcon != null) trayIcon.Visible = false; } catch { }
+            // 先停服务，避免 exe / node 被占用导致覆盖失败
+            StopServer();
+            try { Hide(); } catch { }
+
+            try
+            {
+                Process.Start(new ProcessStartInfo(file) { UseShellExecute = true, Arguments = "/S" });
+            }
+            catch (Exception ex)
+            {
+                MessageBox.Show("启动安装程序失败，请手动运行：\r\n" + file + "\r\n\r\n" + ex.Message,
+                    "DeepSeek Harness 更新", MessageBoxButtons.OK, MessageBoxIcon.Error);
                 return;
             }
-
-            // 先停服务再启动安装程序，避免 exe / node 被占用导致覆盖失败
-            shuttingDown = true;
-            StopServer();
-            Process.Start(new ProcessStartInfo(file) { UseShellExecute = true });
             Application.Exit();
         }
 
@@ -1596,6 +1883,17 @@ namespace DeepSeekHarness
                     g.DrawLine(p, cx + 4.5f, cy - 4.5f, cx - 4.5f, cy + 4.5f);
                 }
             }
+        }
+    }
+
+    // 双缓冲面板：启动页与占位卡片每 500ms 刷新文案，普通 Panel 会闪，这个不会
+    internal sealed class BufferedPanel : Panel
+    {
+        public BufferedPanel()
+        {
+            SetStyle(ControlStyles.UserPaint | ControlStyles.AllPaintingInWmPaint |
+                     ControlStyles.OptimizedDoubleBuffer, true);
+            UpdateStyles();
         }
     }
 

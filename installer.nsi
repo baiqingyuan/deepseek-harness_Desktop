@@ -73,6 +73,15 @@ Section "Main" SecMain
   WriteRegDWORD HKCU "Software\Microsoft\Windows\CurrentVersion\Uninstall\${APP_NAME}" "NoRepair" 1
 SectionEnd
 
+; 静默安装（应用内更新用 /S 调用）时不显示任何界面，装完直接把新版拉起来 ——
+; 这一步是「关闭应用 → 自主更新 → 自动重开」闭环的最后一段。
+Function .onInstSuccess
+  IfSilent 0 notsilent
+  SetOutPath "$INSTDIR"
+  Exec "$INSTDIR\${APP_EXE}"
+  notsilent:
+FunctionEnd
+
 Section "Uninstall"
   Delete "$DESKTOP\${APP_NAME}.lnk"
   Delete "$SMPROGRAMS\${APP_NAME}\${APP_NAME}.lnk"

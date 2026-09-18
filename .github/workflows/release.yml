@@ -9,6 +9,10 @@ on:
         description: "Release version (e.g. 1.0.0); 仅手动触发时生效"
         required: true
         default: "1.0.0"
+      asset_tag:
+        description: "应用内更新：把产物覆盖上传到这个已存在的 Release（如 v0.8.0），不新建发行版；留空则按 version 新建 Release"
+        required: false
+        default: ""
 
 permissions:
   contents: write
@@ -153,10 +157,12 @@ jobs:
         shell: pwsh
         env:
           REL_VERSION: ${{ steps.ver.outputs.version }}
+          ASSET_TAG: ${{ inputs.asset_tag }}
         run: |
           $v = $env:REL_VERSION
           $repo = "${{ github.repository }}"
-          $tag = "v$v"
+          # 应用内更新：产物挂在指定的旧 Release 上，但 latest.json 里的版本号是新的
+          $tag = if ($env:ASSET_TAG) { $env:ASSET_TAG } else { "v$v" }
           $base = "https://github.com/$repo/releases/download/$tag"
           $setupName = "DeepSeekHarness-Setup-v$v-win-x64.exe"
           $zipName   = "DeepSeekHarness-Desktop-v$v-win-x64.zip"
@@ -201,7 +207,23 @@ jobs:
           Write-Host "latest.json:"
           Write-Host $json
 
+      - name: Upload assets to existing release (in-app update, no new release page)
+        # 只在手动触发且填了 asset_tag 时执行：把新产物覆盖到已有的那个 Release，
+        # 客户端读到的 latest.json 版本号是新的，于是走应用内更新，而 Releases 页面不新增条目。
+        if: github.event_name == 'workflow_dispatch' && inputs.asset_tag != ''
+        shell: pwsh
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          ASSET_TAG: ${{ inputs.asset_tag }}
+        run: |
+          gh release upload "$env:ASSET_TAG" `
+            dist/DeepSeekHarness-Desktop-*.zip `
+            dist/DeepSeekHarness-Setup-*.exe `
+            dist/latest.json --clobber
+          Write-Host "已覆盖上传至 $env:ASSET_TAG（不新建 Release）"
+
       - name: Upload release assets
+        if: github.event_name != 'workflow_dispatch' || inputs.asset_tag == ''
         uses: softprops/action-gh-release@v2
         with:
           body: ${{ steps.notes.outputs.body }}
