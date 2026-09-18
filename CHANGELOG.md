@@ -2,6 +2,19 @@
 
 本项目所有重要改动记录于此。格式参考 [Keep a Changelog](https://keepachangelog.com/)，版本号遵循 [语义化版本](https://semver.org/lang/zh-CN/)。
 
+## [0.8.0] - 2026-09-18
+
+> 去掉 v0.7.x 的 iOS 化外观，改回简洁的 Windows 扁平风格；并彻底消灭启动时弹出的黑色终端窗口。
+
+### 修复 (Fixed)
+- **启动时弹出终端窗口（黑框）**：服务进程原本用 `CreateNoWindow = false` + `WindowStyle = Hidden` 启动，但 `WindowStyle` 只在 `UseShellExecute = true` 时生效；`UseShellExecute = false` 下子进程会新建一个真正的控制台，于是每次启动都闪出一个 node 的终端窗口。现在改为 `CreateNoWindow = true`，压根不创建控制台（stdout 重定向与 token 抓取不受影响）。代价是无法再投递 Ctrl+C，退出时直接结束整棵进程树，仍保证无残留进程。
+
+### 变更 (Changed)
+- **取消 iOS 界面**：移除 macOS/iOS 风格的交通灯按钮、居中标题、大圆角窗口裁切与圆角占位卡片，改为 Windows 11 观感的扁平界面 —— 白底标题栏 + 1px 分隔线、左侧程序图标与标题、右侧本地端口 + 标准「最小化 / 最大化 / 关闭」按钮（悬停浅灰底，关闭键悬停红底白叉，图标全部用 GDI 画线，不依赖符号字体）。
+- **窗口描边**：无边框窗口改为 1px 浅灰描边（底色 + `Padding` 实现），配合 `CS_DROPSHADOW` 投影，边缘更清晰；不再做 Region 圆角裁切，去掉锯齿与相关 GDI/DWM 调用。
+- **配色与字体**：替换为偏 Windows 的中性灰白配色与 DeepSeek 蓝强调色；标题栏高度 44px → 40px。
+- **启动占位卡片**：改为扁平白卡片 + 系统原生走马灯进度条 + 版本号，替代原来的圆角卡片。
+
 ## [0.7.1] - 2026-09-18
 
 > 修复 v0.7.0 的启动崩溃（双击后毫无反应）。**v0.7.0 无法启动，请升级到本版本。**
