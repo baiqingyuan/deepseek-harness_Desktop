@@ -48,8 +48,8 @@ jobs:
           # choco 不会把 NSIS 加入 PATH，这里显式加入，供 build.ps1 通过 Get-Command makensis 找到
           echo "C:\Program Files (x86)\NSIS" | Out-File -Append -FilePath $env:GITHUB_PATH -Encoding utf8
 
-      - name: Resolve version
-        id: ver
+      - name: Resolve version and target release
+        id: meta
         shell: pwsh
         run: |
           if ($env:GITHUB_REF_TYPE -eq 'tag') {
@@ -57,11 +57,20 @@ jobs:
           } else {
             $v = '${{ inputs.version }}'
           }
+          # 应用内更新：产物覆盖上传到「已存在的」某个 Release，不新建发行版条目。
+          # 优先用手动触发时填的 asset_tag；否则读仓库根的 asset-tag.txt（内容形如 v0.8.0）；
+          # 两者都为空时才按正常流程发布新 Release。
+          $target = '${{ inputs.asset_tag }}'
+          if (-not $target -and (Test-Path 'asset-tag.txt')) {
+            $target = (Get-Content -LiteralPath 'asset-tag.txt' -Raw).Trim()
+          }
           echo "version=$v" >> $env:GITHUB_OUTPUT
+          echo "asset_tag=$target" >> $env:GITHUB_OUTPUT
+          Write-Host "version=$v  asset_tag=$target"
 
       - name: Build
         shell: pwsh
-        run: ./build.ps1 -Version ${{ steps.ver.outputs.version }}
+        run: ./build.ps1 -Version ${{ steps.meta.outputs.version }}
 
       # 启动冒烟测试：编译通过 ≠ 能运行。
       # v0.7.0 就是编译正常但构造界面时抛异常、进程秒退，用户双击毫无反应。
@@ -86,7 +95,7 @@ jobs:
 
       - name: Package
         shell: pwsh
-        run: ./package-release.ps1 -Version ${{ steps.ver.outputs.version }}
+        run: ./package-release.ps1 -Version ${{ steps.meta.outputs.version }}
 
       # ---- SignPath 代码签名（免费 OSS 证书，OV 级，受 Windows 信任）----
       # 仅在仓库配置了 SIGNPATH_API_TOKEN 等 Secrets 时执行；否则整段跳过，照常发布未签名包。
@@ -124,7 +133,7 @@ jobs:
         id: notes
         shell: pwsh
         env:
-          REL_VERSION: ${{ steps.ver.outputs.version }}
+          REL_VERSION: ${{ steps.meta.outputs.version }}
         run: |
           # 从 CHANGELOG.md 取出当前版本那一段作为 Release 说明（以前每次 Release 说明都是空的）。
           $v = $env:REL_VERSION
@@ -156,8 +165,8 @@ jobs:
         # release 资源下载域名没有匿名 API 限流（60 次/小时/IP），同一出口 IP 下多人使用也能拿到更新。
         shell: pwsh
         env:
-          REL_VERSION: ${{ steps.ver.outputs.version }}
-          ASSET_TAG: ${{ inputs.asset_tag }}
+          REL_VERSION: ${{ steps.meta.outputs.version }}
+          ASSET_TAG: ${{ steps.meta.outputs.asset_tag }}
         run: |
           $v = $env:REL_VERSION
           $repo = "${{ github.repository }}"
@@ -210,11 +219,11 @@ jobs:
       - name: Upload assets to existing release (in-app update, no new release page)
         # 只在手动触发且填了 asset_tag 时执行：把新产物覆盖到已有的那个 Release，
         # 客户端读到的 latest.json 版本号是新的，于是走应用内更新，而 Releases 页面不新增条目。
-        if: github.event_name == 'workflow_dispatch' && inputs.asset_tag != ''
+        if: steps.meta.outputs.asset_tag != ''
         shell: pwsh
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
-          ASSET_TAG: ${{ inputs.asset_tag }}
+          ASSET_TAG: ${{ steps.meta.outputs.asset_tag }}
         run: |
           gh release upload "$env:ASSET_TAG" `
             dist/DeepSeekHarness-Desktop-*.zip `
@@ -223,7 +232,7 @@ jobs:
           Write-Host "已覆盖上传至 $env:ASSET_TAG（不新建 Release）"
 
       - name: Upload release assets
-        if: github.event_name != 'workflow_dispatch' || inputs.asset_tag == ''
+        if: steps.meta.outputs.asset_tag == ''
         uses: softprops/action-gh-release@v2
         with:
           body: ${{ steps.notes.outputs.body }}
