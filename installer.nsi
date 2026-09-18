@@ -79,7 +79,7 @@ Function .onInstSuccess
   IfSilent 0 notsilent
   SetOutPath "$INSTDIR"
   Exec "$INSTDIR\${APP_EXE}"
-  notsilent:
+notsilent:
 FunctionEnd
 
 Section "Uninstall"

@@ -17,6 +17,7 @@ on:
 permissions:
   contents: write
   actions: read
+  issues: write
 
 jobs:
   build:
@@ -70,7 +71,27 @@ jobs:
 
       - name: Build
         shell: pwsh
-        run: ./build.ps1 -Version ${{ steps.meta.outputs.version }}
+        run: |
+          # 把完整输出留一份到 build.log：CI 日志需要管理员权限才能下载，
+          # 出错时靠它把真正的错误（csc / makensis / pnpm）公开出来。
+          & ./build.ps1 -Version ${{ steps.meta.outputs.version }} *>&1 | Tee-Object -FilePath build.log
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+
+      - name: Report build failure
+        if: failure()
+        shell: pwsh
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          $title = "CI 构建失败 v${{ steps.meta.outputs.version }}"
+          if (Test-Path build.log) {
+            $log = Get-Content -LiteralPath build.log -Raw
+            if ($log.Length -gt 60000) { $log = $log.Substring($log.Length - 60000) }
+            Set-Content -LiteralPath issue-body.md -Value $log -Encoding UTF8
+          } else {
+            Set-Content -LiteralPath issue-body.md -Value "没有 build.log，请查看 Actions 运行日志。" -Encoding UTF8
+          }
+          gh issue create --title $title --body-file issue-body.md
 
       # 启动冒烟测试：编译通过 ≠ 能运行。
       # v0.7.0 就是编译正常但构造界面时抛异常、进程秒退，用户双击毫无反应。
