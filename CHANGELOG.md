@@ -2,11 +2,32 @@
 
 本项目所有重要改动记录于此。格式参考 [Keep a Changelog](https://keepachangelog.com/)，版本号遵循 [语义化版本](https://semver.org/lang/zh-CN/)。
 
+## [0.4.0] - 2026-09-18
+
+> 跟进上游 `deepseek-ai/deepseek-harness` 的近期更新，重点解决 **新版 dsh Web 控制台加了浏览器 token 鉴权** 导致的界面不可用问题（旧版壳直接访问 `http://127.0.0.1:3080` 会被 401 挡掉）。
+
+### 修复 (Fixed)
+- **适配 dsh 浏览器鉴权（关键）**：自 dsh `0.1.2` 起，Web 控制台要求浏览器会话鉴权 —— 每次启动生成一次性 token，`/?token=...` 经服务端校验后才下发会话 Cookie，未携带时所有 `/api` 调用返回 401，界面表现为能打开但连不上。桌面壳现在会捕获 dsh 的 stdout，解析 `dsh web: http://127.0.0.1:3080/?token=...` 就绪行并以此为起始地址；服务端校验后 303 跳转到干净根路径，界面恢复正常。旧版 dsh（无 token）打印的 URL 行同样适用。
+- **不再额外弹系统浏览器**：启动时给 dsh 传 `--no-open`，界面只在本窗口内呈现（此前 dsh 会再开一次默认浏览器）。
+- **残留进程改为重启而非接管**：端口被"本目录 dsh"的残留进程占用时，旧逻辑会接管它，但接管拿不到本次启动的 token，界面必然 401。现改为先清理该残留进程再重新拉起（判断为非本应用进程时仍按「端口被占用」报错）。
+- **兜底兼容旧版 dsh**：若端口已开放但 10 秒内没有 URL 行（旧版不打印），直接访问根路径，不会卡满 90 秒。
+
+### 变更 (Changed)
+- **升级底层 dsh 到 `0.1.5-rc.2`**（npm `latest` 稳定通道；`build.ps1` 的 `DshVersion` 支持填 `latest` / `alpha` 自动从 dist-tag 解析，官方 master 预发布线目前为 `0.1.6-alpha.2`）。
+- **内置 Node.js 升级到 `v24.21.0`**（LTS "Krypton"；上游要求 `^22.19.0 || >=24.0.0`）。
+- **退出改为优雅关闭**：官方 dsh 只在 `SIGINT` / `SIGTERM` 上做优雅关闭（5 秒内 dispose 插件树）。Windows 无信号，现在改为附加到子进程控制台后发送 Ctrl+C（node 在 Windows 上映射为 SIGINT），最多等 6 秒；仍未退出再补一记 Ctrl+Break，最后才退回原有的强制结束进程树。优雅路径不可用时行为与之前完全一致。
+- **启动诊断直达**：dsh 启动失败时会把完整报告落到 `$DSH_HOME/logs/startup-*.log` 并在 stderr 给出 `Full diagnostics:` 行，现在该路径会直接显示在错误提示里。
+- **构建缓存按版本失效**：`dist/_dsh-build` 增加版本戳，切换 dsh 版本时自动清理旧的 `node_modules`，避免装错版本。
+- **pnpm 构建白名单对齐上游**：`koffi` / `node-pty` / `@deepseek-ai/dsh-subprocess-local` 允许，`@google/genai` / `protobufjs` / `node-addon-require-builtin` 显式拒绝；另加一次 `dangerouslyAllowAllBuilds` 兜底重试，减少升级 dsh 时的安装失败。
+- **使用说明同步**：内置说明改为「关窗 = 最小化到托盘，服务继续运行；真正退出才停止」，并标注内置 dsh 版本。
+
+### 文档 (Docs)
+- README 补充「与上游 / 官方桌面版」章节：说明上游已另有一个 Electron 桌面版（`apps/desktop`），本项目定位为更轻的 WinForms + WebView2 薄壳。
+
 ## [Unreleased]
 
 ### 变更 (Changed)
 - **托盘恢复改为单击**：原需双击托盘图标或右键「显示主界面」才能恢复窗口，现改为**单击托盘图标**即可恢复，更顺手；右键菜单仍保留「显示主界面 / 真正退出」。
-- **升级底层 dsh 到 `0.1.1-rc.2`**：`build.ps1` 的 `DshVersion` 由 `0.1.0-rc.6` 升级到官方当前最新 `0.1.1-rc.2`（npm `latest`/`next` 均指向此；0.1.1 系新增开箱即用的视觉模型支持 `deepseek-v4-flash-vision-exp`）。dsh 仍处 Developer Preview、官方警告存在破坏兼容性变更，本次仅跟进 RC，未升到稳定版（稳定版尚未发布）。
 
 ### 安全 / 构建 (Security / Build)
 - **CI 接入 SignPath 免费代码签名**：`release.yml` 在构建出 `Setup.exe` 后新增签名步骤（上传产物 → 提交 SignPath 签名 → 回写 `dist/`）。仅在仓库配置 `SIGNPATH_API_TOKEN` 等 Secrets 时生效，未配置则自动跳过、照常发布未签名包，不破坏现有流程。签名后 `Setup.exe` 由「未知发布者」升级为受 Windows 信任的 OV 证书（发布者显示为 SignPath Foundation）。
@@ -62,9 +83,9 @@
 > 以下为候选方向，按「用户价值 / 工作量」粗略排序，**非承诺清单**。实施前请确认优先级与上游 `@deepseek-ai/dsh` 的能力边界。
 
 ### 高优先（体验与可信度）
-- **代码签名 / SmartScreen 免警告**：当前 `Setup.exe` 与 `exe` 无签名，Windows 会报「未知发布者」。引入签名（需代码签名证书，可用免费 `signtool` + 自签/受信 CA）消除拦截，显著提升普通用户安装成功率。
-- **托盘常驻 + 最小化到托盘**：关闭窗口改为「最小化到系统托盘」而非直接停服务，点托盘图标恢复；避免误关后重等启动。可配套「真正退出」菜单项。 > **已在 v0.3.0 实现。**
-- **升级 dsh 到稳定版**：当前已跟进到 `0.1.1-rc.2`（RC）。核查上游是否已发布正式版（1.0）并跟进，减少 RC 不稳定带来的偶发问题。
+- ~~**代码签名 / SmartScreen 免警告**~~ > **已在 v0.4.0 通过 CI 接入 SignPath 实现。**
+- ~~**托盘常驻 + 最小化到托盘**~~ > **已在 v0.3.0 实现。**
+- ~~**升级 dsh 到稳定版**~~ > **已在 v0.4.0 跟进到 npm `latest`（0.1.5-rc.2）；上游仍为 0.1.x 预发布线，1.0 正式版发布后再跟进。**
 
 ### 中优先（自助与运维）
 - **自动更新（Self-update）**：发布后用户无需手动回 Releases。新增「检查更新」+ 一键下载安装包（或静默调用 Setup.exe 覆盖安装）。

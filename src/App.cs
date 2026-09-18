@@ -5,6 +5,7 @@ using System.IO;
 using System.Net;
 using System.Net.Sockets;
 using System.Text;
+using System.Text.RegularExpressions;
 using System.Threading;
 using System.Threading.Tasks;
 using System.Windows.Forms;
@@ -83,6 +84,10 @@ namespace DeepSeekHarness
         private readonly string dshPath;
         private readonly StringBuilder errorTail = new StringBuilder();
         private WebView2 webView;
+        // dsh 每次启动都会生成一次性 token，并把带 token 的 URL 打到 stdout；
+        // 桌面壳必须拿到它才能通过新版 Web 控制台的浏览器鉴权（否则所有 /api 调用 401）。
+        private readonly TaskCompletionSource<string> readyUrlSource = new TaskCompletionSource<string>();
+        private string diagnosticsHint;
         private Label statusLabel;
         private Process serverProc;
         private bool ownsServer;
@@ -127,9 +132,9 @@ namespace DeepSeekHarness
         {
             try
             {
-                await StartServerIfNeededAsync();
+                string startUrl = await StartServerIfNeededAsync();
                 if (shuttingDown) return;
-                await InitializeWebViewAsync();
+                await InitializeWebViewAsync(startUrl);
             }
             catch (Exception ex)
             {
@@ -145,7 +150,7 @@ namespace DeepSeekHarness
         }
 
         // WebView2 初始化（带重试：偶发 E_ABORT，多为上一次实例未完全退出导致，稍候重试即可）
-        private async Task InitializeWebViewAsync()
+        private async Task InitializeWebViewAsync(string startUrl)
         {
             // 运行前先确认 WebView2 运行时已安装；缺失则引导用户一键安装后再继续。
             if (!IsWebView2RuntimeAvailable())
@@ -164,7 +169,7 @@ namespace DeepSeekHarness
             Exception last = null;
             for (int attempt = 1; attempt <= 3; attempt++)
             {
-                Exception ex = await TryCreateWebViewAsync();
+                Exception ex = await TryCreateWebViewAsync(startUrl);
                 if (ex == null) return;
                 last = ex;
                 if (attempt < 3) await Task.Delay(2000 * attempt);
@@ -226,7 +231,7 @@ namespace DeepSeekHarness
         }
 
         // 成功返回 null；失败返回异常并清理控件
-        private async Task<Exception> TryCreateWebViewAsync()
+        private async Task<Exception> TryCreateWebViewAsync(string startUrl)
         {
             WebView2 view = null;
             try
@@ -244,7 +249,9 @@ namespace DeepSeekHarness
                 view.CoreWebView2.Settings.AreDefaultContextMenusEnabled = false;
                 view.CoreWebView2.Settings.IsStatusBarEnabled = false;
                 view.CoreWebView2.NavigationCompleted += OnNavigationCompleted;
-                view.Source = new Uri("http://127.0.0.1:" + Port);
+                // startUrl 形如 http://127.0.0.1:3080/?token=xxx：
+                // 服务端校验 token 后写入会话 Cookie 并 303 跳转到干净的 /，之后一切正常。
+                view.Source = new Uri(startUrl);
 
                 // WebView 就绪，移除占位提示
                 if (statusLabel != null) { Controls.Remove(statusLabel); statusLabel.Dispose(); statusLabel = null; }
@@ -270,17 +277,16 @@ namespace DeepSeekHarness
             }
         }
 
-        // 异步等待服务就绪，避免阻塞 UI 线程（旧实现用 Thread.Sleep 导致白屏卡死）。
-        private async Task StartServerIfNeededAsync()
+        // 启动本地 dsh Web 服务，返回本次可直接访问的起始 URL（带一次性 token）。
+        private async Task<string> StartServerIfNeededAsync()
         {
+            // 端口已被占用：先尝试停掉"本目录 dsh"的残留进程再重新拉起，
+            // 因为新版 dsh 需要本次进程的一次性 token，接管旧进程拿不到。
             if (IsPortOpen(Port))
             {
-                AdoptExistingServer();
-                // 端口开了但没找到本应用自己的 dsh 进程：说明被别的程序占用，
-                // 不应静默接管/显示他人内容，直接提示用户。
-                if (serverProc == null)
+                bool stopped = await StopOwnedServerAsync();
+                if (!stopped)
                     throw new Exception("端口 " + Port + " 已被其他程序占用，无法启动本地服务。\n请关闭占用该端口的程序后重试。");
-                return;
             }
 
             if (!File.Exists(nodePath))
@@ -290,10 +296,14 @@ namespace DeepSeekHarness
 
             ProcessStartInfo psi = new ProcessStartInfo();
             psi.FileName = nodePath;
-            psi.Arguments = "\"" + dshPath + "\" web";
+            // --no-open：不额外打开系统默认浏览器（界面由本窗口承载）
+            // --port：显式固定端口，与 Port 常量保持一致
+            psi.Arguments = "\"" + dshPath + "\" web --no-open --port " + Port;
             psi.WorkingDirectory = baseDir;
             psi.UseShellExecute = false;
-            psi.CreateNoWindow = true;
+            // 保留（隐藏的）控制台：退出时才能用 Ctrl+Break 让 dsh 优雅排空插件树
+            psi.CreateNoWindow = false;
+            psi.WindowStyle = ProcessWindowStyle.Hidden;
             psi.RedirectStandardOutput = true;
             psi.RedirectStandardError = true;
 
@@ -301,11 +311,17 @@ namespace DeepSeekHarness
             if (serverProc == null) throw new Exception("无法启动 dsh 服务进程。");
             ownsServer = true;
 
-            serverProc.OutputDataReceived += delegate { };
+            serverProc.OutputDataReceived += delegate (object s, DataReceivedEventArgs ev)
+            {
+                TryCaptureReadyUrl(ev.Data);
+            };
             serverProc.ErrorDataReceived += delegate (object s, DataReceivedEventArgs ev)
             {
                 if (ev.Data != null)
                 {
+                    // 官方启动诊断会把完整报告落盘并在这里给出路径，单独记下来方便提示用户。
+                    if (ev.Data.IndexOf("Full diagnostics:", StringComparison.Ordinal) >= 0)
+                        diagnosticsHint = ev.Data.Trim();
                     lock (errorTail)
                     {
                         if (errorTail.Length > 8000) errorTail.Remove(0, 4000);
@@ -316,28 +332,68 @@ namespace DeepSeekHarness
             serverProc.BeginOutputReadLine();
             serverProc.BeginErrorReadLine();
 
-            DateTime deadline = DateTime.UtcNow.AddSeconds(90);
-            int waited = 0;
-            while (DateTime.UtcNow < deadline)
+            return await WaitForReadyUrlAsync();
+        }
+
+        // 从 stdout 抓取形如 "dsh web: http://127.0.0.1:3080/?token=xxx (LAN: ...)" 的就绪行。
+        private void TryCaptureReadyUrl(string line)
+        {
+            if (string.IsNullOrEmpty(line)) return;
+            int i = line.IndexOf("dsh web:", StringComparison.Ordinal);
+            if (i < 0) return;
+            Match m = Regex.Match(line, @"https?://\S+");
+            if (m.Success) readyUrlSource.TrySetResult(m.Value);
+        }
+
+        // 等待服务就绪：优先等带 token 的 URL 行；若端口已开但迟迟没有 URL 行
+        // （旧版 dsh 不打印），兜底直接访问根路径。
+        private async Task<string> WaitForReadyUrlAsync()
+        {
+            DateTime start = DateTime.UtcNow;
+            DateTime portOpenAt = DateTime.MinValue;
+            while (true)
             {
-                if (serverProc.HasExited)
+                if (serverProc != null && serverProc.HasExited && !readyUrlSource.Task.IsCompleted)
                     throw new Exception("dsh 服务进程已退出。" + ErrorTailText());
-                if (IsPortOpen(Port)) return;
-                await Task.Delay(1000);
-                waited++;
+                if (readyUrlSource.Task.IsCompleted) return readyUrlSource.Task.Result;
+
+                bool open = IsPortOpen(Port);
+                if (open && portOpenAt == DateTime.MinValue) portOpenAt = DateTime.UtcNow;
+                if (open && portOpenAt != DateTime.MinValue &&
+                    DateTime.UtcNow - portOpenAt > TimeSpan.FromSeconds(10))
+                    return "http://127.0.0.1:" + Port + "/";
+
+                if (DateTime.UtcNow - start > TimeSpan.FromSeconds(90))
+                    throw new Exception("等待 dsh 服务就绪超时（90 秒）。" + ErrorTailText());
+
+                int waited = (int)((DateTime.UtcNow - start).TotalSeconds);
                 if (statusLabel != null && !statusLabel.IsDisposed)
                 {
                     BeginInvoke(new Action(() =>
-                        statusLabel.Text = "正在启动 DeepSeek Harness 本地服务…（已等待 " + waited + " 秒）"));
+                    {
+                        if (statusLabel != null && !statusLabel.IsDisposed)
+                            statusLabel.Text = "正在启动 DeepSeek Harness 本地服务…（已等待 " + waited + " 秒）";
+                    }));
                 }
+                await Task.Delay(500);
             }
-            throw new Exception("等待 dsh 服务就绪超时（90 秒）。" + ErrorTailText());
         }
 
-        // 若端口已被本目录安装的 dsh 服务占用（例如上次异常残留），接管该进程，
-        // 使关闭窗口时也能一并停止，避免遗留后台服务。
-        // 由于已做单实例互斥，这里接管到的只会是"上一次崩溃残留"的进程，可安全清理。
-        private void AdoptExistingServer()
+        // 找到并停掉"本目录 dsh"残留的服务进程（例如上次异常退出遗留的 node.exe）。
+        private async Task<bool> StopOwnedServerAsync()
+        {
+            int pid = FindOwnedServerPid();
+            if (pid <= 0) return false;
+            KillProcessTree(pid);
+            for (int i = 0; i < 24; i++)
+            {
+                await Task.Delay(500);
+                if (!IsPortOpen(Port)) return true;
+            }
+            return !IsPortOpen(Port);
+        }
+
+        private int FindOwnedServerPid()
         {
             try
             {
@@ -352,14 +408,14 @@ namespace DeepSeekHarness
                         if (cmd == null) continue;
                         if (cmd.ToLowerInvariant().IndexOf(marker, StringComparison.Ordinal) >= 0)
                         {
-                            int pid = Convert.ToInt32(o["ProcessId"]);
-                            try { serverProc = Process.GetProcessById(pid); ownsServer = true; break; }
+                            try { return Convert.ToInt32(o["ProcessId"]); }
                             catch { }
                         }
                     }
                 }
             }
             catch { }
+            return 0;
         }
 
         private static bool IsPortOpen(int port)
@@ -379,10 +435,14 @@ namespace DeepSeekHarness
 
         private string ErrorTailText()
         {
+            string hint = diagnosticsHint;
             lock (errorTail)
             {
                 string t = errorTail.ToString().Trim();
-                return t.Length == 0 ? "" : "\r\n\r\n服务日志（尾部）：\r\n" + t;
+                string extra = "";
+                if (!string.IsNullOrEmpty(hint) && t.IndexOf(hint, StringComparison.Ordinal) < 0)
+                    extra = "\r\n\r\n启动诊断：" + hint;
+                return t.Length == 0 ? extra : "\r\n\r\n服务日志（尾部）：\r\n" + t + extra;
             }
         }
 
@@ -405,9 +465,17 @@ namespace DeepSeekHarness
                 {
                     if (serverProc != null && !serverProc.HasExited)
                     {
-                        if (ownsServer) KillProcessTree(serverProc.Id); // 连带子进程一起清理
-                        else serverProc.Kill();                         // 端口上是别人：仅尽力终止
-                        serverProc.WaitForExit(3000);
+                        if (ownsServer)
+                        {
+                            // 先按官方约定优雅排空（插件树最多 5 秒 dispose），失败再强杀整棵进程树
+                            bool graceful = TryGracefulStop(serverProc);
+                            if (!graceful || !serverProc.HasExited) KillProcessTree(serverProc.Id);
+                        }
+                        else
+                        {
+                            try { serverProc.Kill(); } catch { }
+                        }
+                        if (!serverProc.HasExited) serverProc.WaitForExit(3000);
                     }
                 }
                 catch { }
@@ -477,6 +545,59 @@ namespace DeepSeekHarness
                     ToolTipIcon.Info);
             }
             catch { }
+        }
+
+        // ---------- 优雅停止（对齐官方 SIGTERM 行为） ----------
+        private delegate bool ConsoleCtrlHandler(uint ctrlType);
+
+        private static readonly ConsoleCtrlHandler CtrlHandlerRef = OnConsoleCtrl;
+
+        [System.Runtime.InteropServices.DllImport("kernel32.dll", SetLastError = true)]
+        private static extern bool AttachConsole(uint dwProcessId);
+
+        [System.Runtime.InteropServices.DllImport("kernel32.dll", SetLastError = true)]
+        private static extern bool FreeConsole();
+
+        [System.Runtime.InteropServices.DllImport("kernel32.dll", SetLastError = true)]
+        private static extern bool GenerateConsoleCtrlEvent(uint dwCtrlEvent, uint dwProcessGroupId);
+
+        [System.Runtime.InteropServices.DllImport("kernel32.dll", SetLastError = true)]
+        private static extern bool SetConsoleCtrlHandler(ConsoleCtrlHandler handler, bool add);
+
+        private const uint CTRL_C_EVENT = 0;
+        private const uint CTRL_BREAK_EVENT = 1;
+
+        // 我们自己不能被同一次 Ctrl+Break 带走：只吞掉 C / Break，其余交给默认处理。
+        private static bool OnConsoleCtrl(uint ctrlType)
+        {
+            return ctrlType == CTRL_C_EVENT || ctrlType == CTRL_BREAK_EVENT;
+        }
+
+        // Windows 没有 SIGTERM。dsh 只在 SIGINT / SIGTERM 上做优雅关闭，而 node 在 Windows
+        // 上把 Ctrl+C 映射为 SIGINT，因此先发 Ctrl+C；仍未退出再补一记 Ctrl+Break。
+        // 任何一步失败都返回 false，由调用方退回强制结束进程树，行为不会比原来更差。
+        private static bool TryGracefulStop(Process proc)
+        {
+            try
+            {
+                if (proc.HasExited) return true;
+                // 本进程已有控制台（例如从命令行启动）时无法附加，直接放弃优雅路径。
+                if (!AttachConsole((uint)proc.Id)) return false;
+                try
+                {
+                    SetConsoleCtrlHandler(CtrlHandlerRef, true);
+                    if (!GenerateConsoleCtrlEvent(CTRL_C_EVENT, 0)) return false;
+                    if (proc.WaitForExit(6000)) return true; // 官方最多 5 秒 dispose 后自行退出
+                    GenerateConsoleCtrlEvent(CTRL_BREAK_EVENT, 0);
+                    return proc.WaitForExit(2000);
+                }
+                finally
+                {
+                    try { SetConsoleCtrlHandler(CtrlHandlerRef, false); } catch { }
+                    FreeConsole();
+                }
+            }
+            catch { return false; }
         }
 
         // 递归杀掉整棵进程树（WMI 查子进程），确保关窗即停、无残留。

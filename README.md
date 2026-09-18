@@ -24,9 +24,10 @@
 - ✅ **真正独立的 exe**：原生窗口（无地址栏/标签页），基于 WebView2
 - ✅ **自包含**：应用目录自带 `node.exe` + 全部 `node_modules`，整个文件夹可整体拷走
 - ✅ **打开即用**：双击启动 → 自动拉起本地 dsh 服务 → 窗口加载界面（实测约 4 秒就绪）
-- ✅ **关窗即停**：关闭窗口自动停止服务，不残留后台进程（也会接管并清理异常残留）
+- ✅ **关窗不停服**：关闭窗口只是最小化到系统托盘，本地服务继续运行；右键托盘图标「真正退出」才会停止（退出时先优雅排空，再兜底清理进程树）
 - ✅ **零配置**：Windows 10/11 自带 .NET Framework 与 WebView2 运行时，无需额外安装
 - ✅ **自动修复依赖**：检测到 WebView2 运行时缺失时会弹窗引导一键下载并静默安装；node / dsh 文件被杀软误删或被占用端口时给出明确中文提示，不再黑话报错
+- ✅ **跟随上游**：自动适配新版 dsh 的浏览器鉴权（解析一次性 token URL），不会打开系统默认浏览器、界面只在本窗口内
 
 ## 📥 下载
 
@@ -40,7 +41,7 @@
 1. **推荐**：下载 `DeepSeekHarness-Setup-vX.Y.Z-win-x64.exe`，双击按向导安装（默认装到用户目录，无需管理员权限），桌面与开始菜单自动出现 `DeepSeek Harness` 快捷方式；卸载在「设置 → 应用」里一键完成。
 2. 或下载便携版 zip → 解压（整个文件夹一起解压）→ 双击 `install.bat` 一键创建快捷方式，也可直接双击 `DeepSeekHarness.exe` 运行。
 3. 首次打开在界面中配置你的 **DeepSeek API Key**
-4. 关闭窗口即停止服务
+4. 关闭窗口 = 最小化到系统托盘（服务继续运行）；**单击托盘图标**恢复窗口，右键「真正退出」才彻底停止
 5. 便携版如需卸载：运行 `uninstall.bat` 删除快捷方式，再删除整个文件夹即可
 
 **系统要求**：Windows 10/11 x64（内置 .NET Framework 4.8 与 WebView2 运行时）
@@ -54,6 +55,19 @@
 ```
 
 构建脚本会自动：获取 Node.js → 用 pnpm 安装 `@deepseek-ai/dsh`（扁平布局，无符号链接；pnpm 缺失时自动 `corepack` / `npm i -g pnpm`）→ 下载 WebView2 程序集 → 用系统 csc 编译 exe。
+
+内置版本可通过参数覆盖（默认值见 `build.ps1` 的 `param` 块）：
+
+```powershell
+./build.ps1 -DshVersion latest   # 或 alpha / 具体版本号，如 0.1.6-alpha.2
+./build.ps1 -NodeVersion v24.21.0
+```
+
+## 🔄 与上游 / 官方桌面版
+
+- 上游仓库：[deepseek-ai/deepseek-harness](https://github.com/deepseek-ai/deepseek-harness)，CLI 包为 [`@deepseek-ai/dsh`](https://www.npmjs.com/package/@deepseek-ai/dsh)。本项目默认锁定其 npm `latest` 通道。
+- 上游已另有一个 **Electron 桌面版**（仓库内 `apps/desktop`，含自动更新与 Windows 安装包）。本项目定位是**极薄的 WinForms + WebView2 原生壳**：无 Electron 运行时、体积更小、随官方 npm 包一键升级；不提供自动更新。两者可并存，按需选择。
+- 上游若发布破坏性变更（例如 Web 控制台鉴权方式变化），本项目的适配点集中在 `src/App.cs` 的服务启动与就绪检测部分。
 
 也可以直接用 GitHub Actions 一键发布（无需本机环境）：
 
@@ -104,7 +118,7 @@ MIT，详见 [LICENSE](LICENSE)。
 **DeepSeek Harness Desktop** is a portable Windows app for [DeepSeek Harness (dsh)](https://github.com/deepseek-ai/DeepSeek-Harness): a standalone `DeepSeekHarness.exe` (C# WinForms + WebView2) that bundles its own Node.js runtime and dependencies.
 
 - ✅ No Node.js / browser / CLI needed
-- ✅ Double-click to run; the local dsh service auto-starts and stops with the window
+- ✅ Double-click to run; the local dsh service auto-starts, and closing the window only minimizes to tray (choose "Quit" in the tray menu to stop it)
 - ✅ Portable folder — copy it anywhere on Windows 10/11 x64
 - ⬇️ Download from [Releases](https://github.com/baiqingyuan/deepseek-harness/releases)
 

@@ -1,11 +1,30 @@
 ﻿# build.ps1 - 一键构建 DeepSeek Harness Desktop 便携版
 # 用法: ./build.ps1  （需要联网；Windows PowerShell / pwsh）
 param(
-    [string]$DshVersion = "0.1.1-rc.2",
+    # dsh 版本：默认锁定官方 npm `latest`（稳定通道）。
+    # 也可填 'latest' / 'alpha' 由 npm dist-tag 自动解析（alpha = 官方 master 上的预发布线）。
+    [string]$DshVersion = "0.1.5-rc.2",
     [string]$WebView2Version = "1.0.4129.50",
-    [string]$Version = "0.2.0"
+    [string]$NodeVersion = "v24.21.0",
+    [string]$Version = "0.4.0"
 )
 $ErrorActionPreference = 'Stop'
+
+# 把 latest / alpha 这样的 dist-tag 解析成具体版本号后再锁定，保证可复现。
+if ($DshVersion -eq 'latest' -or $DshVersion -eq 'alpha') {
+    $tag = $DshVersion
+    $resolved = $null
+    try {
+        $resolved = (& npm view "@deepseek-ai/dsh@$tag" version 2>$null | Select-Object -Last 1)
+    } catch { }
+    if ($resolved) { $resolved = ([string]$resolved).Trim() }
+    if (-not $resolved -or $resolved -notmatch '^\d') {
+        throw "无法从 npm 解析 @deepseek-ai/dsh@$tag 的版本号，请显式指定 -DshVersion（例如 0.1.5-rc.2）。"
+    }
+    $DshVersion = $resolved
+    Write-Host "dsh dist-tag '$tag' -> $DshVersion"
+}
+
 $root = Split-Path -Parent $MyInvocation.MyCommand.Path
 $dist = Join-Path $root "dist\DeepSeekHarness"
 $lib  = Join-Path $root "dist\_wv2"
@@ -19,7 +38,7 @@ if ($nodeCmd) {
     Copy-Item -LiteralPath $nodeCmd.Source -Destination (Join-Path $dist "node.exe") -Force
     Write-Host "    copied from PATH: $($nodeCmd.Source)"
 } else {
-    $nodeVer = "v24.14.0"
+    $nodeVer = $NodeVersion
     $tmpZip = Join-Path $env:TEMP "node-$nodeVer-win-x64.zip"
     $tmpDir = Join-Path $env:TEMP "node-$nodeVer-win-x64"
     if (-not (Test-Path (Join-Path $tmpDir "node.exe"))) {
@@ -55,15 +74,28 @@ $pkg = @{
     dependencies = @{ "@deepseek-ai/dsh" = $DshVersion }
 }
 $pkg | ConvertTo-Json -Depth 3 | Set-Content -Encoding ascii -Path (Join-Path $buildDir "package.json")
+# 允许/拒绝哪些依赖的 install 脚本，与官方仓库 pnpm-workspace.yaml 保持一致：
+# node-pty（ConPTY 持久 shell）与 koffi（Windows MoveFileExW 落盘）需要真实构建；
+# 其余几个只是 no-op 脚本，显式拒绝以免 pnpm 严格模式报未登记错误。
 @"
 nodeLinker: hoisted
 allowBuilds:
   '@deepseek-ai/dsh-subprocess-local': true
-  '@google/genai': true
   koffi: true
   node-pty: true
-  protobufjs: true
+  '@google/genai': false
+  protobufjs: false
+  node-addon-require-builtin: false
 "@ | Set-Content -Encoding utf8 -Path (Join-Path $buildDir "pnpm-workspace.yaml")
+
+# dsh 版本变了就必须重装：用版本戳文件判断缓存是否失效。
+$stampFile = Join-Path $buildDir ".dsh-version"
+$stamp = if (Test-Path $stampFile) { (Get-Content -LiteralPath $stampFile -Raw).Trim() } else { "" }
+if ($stamp -ne $DshVersion -and (Test-Path (Join-Path $buildDir "node_modules"))) {
+    Write-Host "    dsh 版本由 '$stamp' 变为 '$DshVersion'，清理旧依赖缓存 ..."
+    Remove-Item -LiteralPath (Join-Path $buildDir "node_modules") -Recurse -Force -ErrorAction SilentlyContinue
+}
+Set-Content -Encoding ascii -Path $stampFile -Value $DshVersion
 
 if (-not (Test-Path (Join-Path $buildDir "node_modules\@deepseek-ai\dsh\lib\bin.js"))) {
     # 未检测到 pnpm 时自动安装，省去开发者手动准备的步骤。
@@ -82,11 +114,19 @@ if (-not (Test-Path (Join-Path $buildDir "node_modules\@deepseek-ai\dsh\lib\bin.
         }
     }
     if (-not $pnpm) { throw "未找到 pnpm，且自动安装失败。请先安装 pnpm（npm i -g pnpm 或 corepack enable）。" }
-    Write-Host "    使用 pnpm: $($pnpm.Source)"
+    Write-Host "    使用 pnpm: $($pnpm.Source)  安装 @deepseek-ai/dsh@$DshVersion"
     Push-Location $buildDir
     try { & $pnpm.Source install --no-frozen-lockfile }
     finally { Pop-Location }
-    if ($LASTEXITCODE -ne 0) { throw "pnpm install 失败" }
+    if ($LASTEXITCODE -ne 0) {
+        # 新版 dsh 的闭包里可能新增了带 lifecycle 脚本的依赖，pnpm 严格模式会直接失败。
+        # 这里放行一次所有构建脚本兜底，避免每次升级 dsh 都要手工补 allowBuilds。
+        Write-Host "    严格构建白名单下安装失败，改用 dangerouslyAllowAllBuilds 重试 ..."
+        Push-Location $buildDir
+        try { & $pnpm.Source install --no-frozen-lockfile --config.dangerouslyAllowAllBuilds=true }
+        finally { Pop-Location }
+        if ($LASTEXITCODE -ne 0) { throw "pnpm install 失败" }
+    }
 }
 if (Test-Path (Join-Path $dist "node_modules")) { Remove-Item -LiteralPath (Join-Path $dist "node_modules") -Recurse -Force }
 Write-Host "    copying node_modules ..."
@@ -110,12 +150,14 @@ Copy-Item -LiteralPath (Join-Path $root "icons\DeepSeekHarness.ico") -Destinatio
 # ---------- 5. 使用说明 ----------
 Write-Host "==> [5/6] write 使用说明.txt"
 @"
-DeepSeek Harness 桌面版
+DeepSeek Harness 桌面版（内置 dsh $DshVersion）
 ========================
 1. 双击 DeepSeekHarness.exe 即可使用
    （或双击「install.bat / 一键安装.bat」自动在桌面与开始菜单创建快捷方式）
 2. 首次打开请在界面中配置 DeepSeek API Key
-3. 关闭窗口即停止服务
+3. 关闭窗口 = 最小化到系统托盘，本地服务继续运行
+   - 单击托盘图标恢复窗口；右键「真正退出」才会停止服务并退出
+4. 界面由本窗口承载，不会额外打开系统浏览器
 
 系统要求：Windows 10/11 x64（自带 .NET Framework 4.8 与 WebView2 运行时）。
 请保持整个文件夹完整（node.exe / node_modules / DLL 与 exe 同目录），不要单独移动 exe。
