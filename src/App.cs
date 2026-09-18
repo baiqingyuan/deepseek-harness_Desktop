@@ -98,6 +98,12 @@ namespace DeepSeekHarness
         private bool navWarned;
         private NotifyIcon trayIcon;
         private bool trayExit;
+        // 最近一次查到的可用更新（启动时静默检查发现后，点托盘气泡即可升级）
+        private UpdateInfo pendingUpdate;
+        private const string UpdateApiUrl =
+            "https://api.github.com/repos/baiqingyuan/deepseek-harness_Desktop/releases/latest";
+        private const string ReleasesPageUrl =
+            "https://github.com/baiqingyuan/deepseek-harness_Desktop/releases";
 
         [System.Runtime.InteropServices.DllImport("user32.dll")]
         [return: System.Runtime.InteropServices.MarshalAs(System.Runtime.InteropServices.UnmanagedType.Bool)]
@@ -139,6 +145,8 @@ namespace DeepSeekHarness
                 if (shuttingDown) return;
                 await InitializeWebViewAsync(startUrl);
                 if (!string.IsNullOrEmpty(portNotice)) ShowBalloon(portNotice, ToolTipIcon.Info);
+                // 界面就绪后再静默查一次更新，有新版只在托盘提示，不打断使用
+                await SilentUpdateCheckAsync();
             }
             catch (Exception ex)
             {
@@ -506,26 +514,7 @@ namespace DeepSeekHarness
             if (!shuttingDown)
             {
                 shuttingDown = true;
-                try
-                {
-                    if (serverProc != null && !serverProc.HasExited)
-                    {
-                        if (ownsServer)
-                        {
-                            // 先按官方约定优雅排空（插件树最多 5 秒 dispose），失败再强杀整棵进程树
-                            bool graceful = TryGracefulStop(serverProc);
-                            if (!graceful || !serverProc.HasExited) KillProcessTree(serverProc.Id);
-                        }
-                        else
-                        {
-                            try { serverProc.Kill(); } catch { }
-                        }
-                        if (!serverProc.HasExited) serverProc.WaitForExit(3000);
-                    }
-                }
-                catch { }
-                try { serverProc.Dispose(); } catch { }
-                serverProc = null;
+                StopServer();
             }
             base.OnFormClosing(e);
         }
@@ -548,6 +537,16 @@ namespace DeepSeekHarness
             };
             // 单击托盘图标即恢复主窗口（用户要求比双击更顺手）；双击同样生效无副作用。
             trayIcon.Click += (s, ev) => ShowForm();
+            // 点更新提示气泡直接进升级流程；其它气泡（如端口提示）则恢复窗口
+            trayIcon.BalloonTipClicked += (s, ev) =>
+            {
+                if (pendingUpdate != null)
+                {
+                    UpdateInfo info = pendingUpdate;
+                    Task ignored = PromptUpdateAsync(info);
+                }
+                else ShowForm();
+            };
         }
 
         private ContextMenuStrip BuildTrayMenu()
@@ -555,9 +554,23 @@ namespace DeepSeekHarness
             var menu = new ContextMenuStrip();
             var open = new ToolStripMenuItem("显示主界面");
             open.Click += (s, ev) => ShowForm();
+            var update = new ToolStripMenuItem("检查更新…");
+            update.Click += async (s, ev) => await CheckForUpdatesAsync(true);
+            var releases = new ToolStripMenuItem("打开下载页面");
+            releases.Click += (s, ev) => OpenReleasesPage();
+            var about = new ToolStripMenuItem("关于 / 版本 v" + AppInfo.Version);
+            about.Click += (s, ev) => MessageBox.Show(
+                "DeepSeek Harness 桌面版\r\n\r\n版本：v" + AppInfo.Version +
+                "\r\n本地服务：http://127.0.0.1:" + port +
+                "\r\n\r\n检查更新可获取 GitHub 上的最新版本。",
+                "关于", MessageBoxButtons.OK, MessageBoxIcon.Information);
             var exit = new ToolStripMenuItem("真正退出");
             exit.Click += (s, ev) => RequestExit();
             menu.Items.Add(open);
+            menu.Items.Add(new ToolStripSeparator());
+            menu.Items.Add(update);
+            menu.Items.Add(releases);
+            menu.Items.Add(about);
             menu.Items.Add(new ToolStripSeparator());
             menu.Items.Add(exit);
             return menu;
@@ -668,6 +681,279 @@ namespace DeepSeekHarness
                 }
             }
             catch { }
+        }
+
+        // ---------- 更新检查与升级 ----------
+
+        // 停掉本地 dsh 服务并释放进程句柄（关窗、安装更新前都会走这里）
+        private void StopServer()
+        {
+            try
+            {
+                if (serverProc != null && !serverProc.HasExited)
+                {
+                    if (ownsServer)
+                    {
+                        // 先按官方约定优雅排空（插件树最多 5 秒 dispose），失败再强杀整棵进程树
+                        bool graceful = TryGracefulStop(serverProc);
+                        if (!graceful || !serverProc.HasExited) KillProcessTree(serverProc.Id);
+                    }
+                    else
+                    {
+                        try { serverProc.Kill(); } catch { }
+                    }
+                    if (!serverProc.HasExited) serverProc.WaitForExit(3000);
+                }
+            }
+            catch { }
+            try { if (serverProc != null) serverProc.Dispose(); } catch { }
+            serverProc = null;
+        }
+
+        // 启动时静默检查一次：失败一律静默，有新版只在托盘提示
+        private async Task SilentUpdateCheckAsync()
+        {
+            try
+            {
+                UpdateInfo info = await FetchLatestReleaseAsync();
+                if (info == null) return;
+                if (!IsNewerVersion(info.Version, AppInfo.Version)) return;
+                pendingUpdate = info;
+                ShowBalloon("发现新版本 v" + info.Version + "，点击此处升级（或右键托盘选「检查更新…」）。",
+                    ToolTipIcon.Info);
+            }
+            catch { }
+        }
+
+        // 用户主动检查：无论结果都给出反馈
+        private async Task CheckForUpdatesAsync(bool userInitiated)
+        {
+            try
+            {
+                UpdateInfo info = await FetchLatestReleaseAsync();
+                if (info == null)
+                {
+                    if (userInitiated)
+                        MessageBox.Show("暂时无法获取更新信息，请稍后重试，或到 GitHub Releases 页面手动下载。",
+                            "检查更新", MessageBoxButtons.OK, MessageBoxIcon.Warning);
+                    return;
+                }
+                if (!IsNewerVersion(info.Version, AppInfo.Version))
+                {
+                    if (userInitiated)
+                        MessageBox.Show("当前已是最新版本（v" + AppInfo.Version + "）。",
+                            "检查更新", MessageBoxButtons.OK, MessageBoxIcon.Information);
+                    return;
+                }
+                pendingUpdate = info;
+                await PromptUpdateAsync(info);
+            }
+            catch (Exception ex)
+            {
+                if (userInitiated)
+                    MessageBox.Show("检查更新失败：" + ex.Message, "检查更新",
+                        MessageBoxButtons.OK, MessageBoxIcon.Warning);
+            }
+        }
+
+        // 展示更新说明并询问是否下载升级
+        private async Task PromptUpdateAsync(UpdateInfo info)
+        {
+            string notes = info.Notes;
+            if (notes.Length > 600) notes = notes.Substring(0, 600) + "…";
+            DialogResult r = MessageBox.Show(
+                "发现新版本 v" + info.Version + "（当前 v" + AppInfo.Version + "）\r\n\r\n" +
+                (string.IsNullOrEmpty(notes) ? "" : notes + "\r\n\r\n") +
+                "是否现在下载安装包并升级？\r\n（约 50 MB，下载后会关闭本应用并启动安装程序）",
+                "DeepSeek Harness 更新", MessageBoxButtons.YesNo, MessageBoxIcon.Information);
+            if (r != DialogResult.Yes) return;
+            await DownloadAndInstallAsync(info);
+        }
+
+        // 下载安装包（带进度），完成后询问是否立即安装
+        private async Task DownloadAndInstallAsync(UpdateInfo info)
+        {
+            if (string.IsNullOrEmpty(info.InstallerUrl))
+            {
+                // 该版本没有提供安装包，交给用户自己在下载页选择便携版
+                OpenReleasesPage();
+                return;
+            }
+
+            string dir = Path.Combine(
+                Environment.GetFolderPath(Environment.SpecialFolder.LocalApplicationData),
+                "DeepSeekHarness", "Updates");
+            Directory.CreateDirectory(dir);
+            string file = Path.Combine(dir, "DeepSeekHarness-Setup-" + info.Version + ".exe");
+
+            ProgressForm progress = new ProgressForm("正在下载更新 v" + info.Version);
+            progress.Show(this);
+            try
+            {
+                using (WebClient wc = new WebClient())
+                {
+                    wc.Headers.Add("User-Agent", "DeepSeekHarness-Desktop/" + AppInfo.Version);
+                    wc.DownloadProgressChanged += delegate (object s, DownloadProgressChangedEventArgs ev)
+                    {
+                        progress.UpdateProgress(ev.ProgressPercentage,
+                            FormatSize(ev.BytesReceived), FormatSize(ev.TotalBytesToReceive));
+                    };
+                    TaskCompletionSource<object> done = new TaskCompletionSource<object>();
+                    wc.DownloadFileCompleted += delegate (object s, System.ComponentModel.AsyncCompletedEventArgs ev)
+                    {
+                        if (ev.Error != null) done.TrySetException(ev.Error);
+                        else done.TrySetResult(null);
+                    };
+                    wc.DownloadFileAsync(new Uri(info.InstallerUrl), file);
+                    await done.Task;
+                }
+            }
+            finally
+            {
+                progress.Close();
+                progress.Dispose();
+            }
+
+            DialogResult r = MessageBox.Show(
+                "更新 v" + info.Version + " 已下载完成。\r\n\r\n是否立即关闭应用并安装？\r\n" +
+                "（安装程序会覆盖更新到原安装目录，配置与会话不会丢失）",
+                "DeepSeek Harness 更新", MessageBoxButtons.YesNo, MessageBoxIcon.Question);
+            if (r != DialogResult.Yes)
+            {
+                MessageBox.Show("安装包已保存，可稍后手动运行：\r\n" + file,
+                    "DeepSeek Harness 更新", MessageBoxButtons.OK, MessageBoxIcon.Information);
+                return;
+            }
+
+            // 先停服务再启动安装程序，避免 exe / node 被占用导致覆盖失败
+            shuttingDown = true;
+            StopServer();
+            Process.Start(new ProcessStartInfo(file) { UseShellExecute = true });
+            Application.Exit();
+        }
+
+        private static void OpenReleasesPage()
+        {
+            try { Process.Start(new ProcessStartInfo(ReleasesPageUrl) { UseShellExecute = true }); }
+            catch { }
+        }
+
+        // 取 GitHub Releases 最新版信息；用正则抽取字段，避免为此引入 JSON 依赖
+        private static async Task<UpdateInfo> FetchLatestReleaseAsync()
+        {
+            try { ServicePointManager.SecurityProtocol |= SecurityProtocolType.Tls12; } catch { }
+            string json;
+            using (WebClient wc = new WebClient())
+            {
+                wc.Encoding = Encoding.UTF8;
+                wc.Headers.Add("User-Agent", "DeepSeekHarness-Desktop/" + AppInfo.Version);
+                wc.Headers.Add("Accept", "application/vnd.github+json");
+                json = await wc.DownloadStringTaskAsync(UpdateApiUrl);
+            }
+            if (string.IsNullOrEmpty(json)) return null;
+
+            Match tag = Regex.Match(json, "\"tag_name\"\\s*:\\s*\"([^\"]+)\"");
+            if (!tag.Success) return null;
+
+            UpdateInfo info = new UpdateInfo();
+            info.Version = tag.Groups[1].Value.TrimStart('v', 'V');
+
+            Match setup = Regex.Match(json, "\"browser_download_url\"\\s*:\\s*\"([^\"]*Setup-[^\"]*\\.exe)\"");
+            info.InstallerUrl = setup.Success ? setup.Groups[1].Value : null;
+
+            Match zip = Regex.Match(json, "\"browser_download_url\"\\s*:\\s*\"([^\"]*Desktop-[^\"]*win-x64\\.zip)\"");
+            info.ZipUrl = zip.Success ? zip.Groups[1].Value : null;
+
+            Match page = Regex.Match(json, "\"html_url\"\\s*:\\s*\"(https://github.com/[^\"]*releases/tag/[^\"]*)\"");
+            info.PageUrl = page.Success ? page.Groups[1].Value : ReleasesPageUrl;
+
+            Match body = Regex.Match(json, "\"body\"\\s*:\\s*\"((?:[^\"\\\\]|\\\\.)*)\"");
+            if (body.Success)
+            {
+                try { info.Notes = Regex.Unescape(body.Groups[1].Value); }
+                catch { info.Notes = body.Groups[1].Value; }
+            }
+            else info.Notes = "";
+            return info;
+        }
+
+        // 只比较数字部分，v0.5.0 / 0.5.0-beta 都能正确处理
+        private static bool IsNewerVersion(string latest, string current)
+        {
+            try
+            {
+                Version a, b;
+                if (!Version.TryParse(NumericPart(latest), out a)) return false;
+                if (!Version.TryParse(NumericPart(current), out b)) return false;
+                return a > b;
+            }
+            catch { return false; }
+        }
+
+        private static string NumericPart(string v)
+        {
+            Match m = Regex.Match(v == null ? "" : v, "\\d+(?:\\.\\d+)*");
+            return m.Success ? m.Value : "0.0.0";
+        }
+
+        private static string FormatSize(long bytes)
+        {
+            if (bytes < 1024) return bytes + " B";
+            if (bytes < 1024 * 1024) return (bytes / 1024.0).ToString("F1") + " KB";
+            return (bytes / 1048576.0).ToString("F1") + " MB";
+        }
+
+        private sealed class UpdateInfo
+        {
+            public string Version = "";
+            public string Notes = "";
+            public string InstallerUrl;
+            public string ZipUrl;
+            public string PageUrl = ReleasesPageUrl;
+        }
+    }
+
+    // 下载更新时的简易进度窗口
+    internal sealed class ProgressForm : Form
+    {
+        private readonly ProgressBar bar;
+        private readonly Label label;
+        private readonly Action<int, string, string> updater;
+
+        public ProgressForm(string title)
+        {
+            Text = title;
+            FormBorderStyle = FormBorderStyle.FixedDialog;
+            StartPosition = FormStartPosition.CenterParent;
+            ClientSize = new Size(420, 110);
+            MaximizeBox = false;
+            MinimizeBox = false;
+            ShowInTaskbar = false;
+            TopMost = true;
+
+            bar = new ProgressBar { Left = 20, Top = 22, Width = 380, Height = 24 };
+            label = new Label { Left = 20, Top = 58, Width = 380, Height = 22, Text = "准备下载…" };
+            Controls.Add(bar);
+            Controls.Add(label);
+
+            updater = SetProgress;
+        }
+
+        public void UpdateProgress(int percent, string received, string total)
+        {
+            if (IsDisposed) return;
+            if (InvokeRequired)
+            {
+                try { BeginInvoke(updater, percent, received, total); } catch { }
+                return;
+            }
+            SetProgress(percent, received, total);
+        }
+
+        private void SetProgress(int percent, string received, string total)
+        {
+            bar.Value = Math.Min(100, Math.Max(0, percent));
+            label.Text = "已下载 " + received + " / " + total;
         }
     }
 }

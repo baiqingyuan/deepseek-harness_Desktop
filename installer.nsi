@@ -42,6 +42,14 @@ SetCompressor /SOLID lzma
 !insertmacro MUI_UNPAGE_INSTFILES
 !insertmacro MUI_LANGUAGE "SimpChinese"
 
+; 覆盖安装（升级）前先结束正在运行的应用 —— 包括最小化到托盘常驻的实例，
+; 否则 DeepSeekHarness.exe / node.exe 被占用会导致覆盖失败。
+Function .onInit
+  nsExec::Exec 'taskkill /IM "${APP_EXE}" /F'
+  Pop $0
+  Sleep 800
+FunctionEnd
+
 Section "Main" SecMain
   SetOutPath "$INSTDIR"
   ; 递归打包整个应用目录（node.exe / node_modules / DLL / exe 等）

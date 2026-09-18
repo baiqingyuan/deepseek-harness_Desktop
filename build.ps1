@@ -6,7 +6,7 @@ param(
     [string]$DshVersion = "0.1.5-rc.2",
     [string]$WebView2Version = "1.0.4129.50",
     [string]$NodeVersion = "v24.21.0",
-    [string]$Version = "0.4.0"
+    [string]$Version = "0.5.0"
 )
 $ErrorActionPreference = 'Stop'
 
@@ -137,13 +137,27 @@ Write-Host "==> [4/6] compile DeepSeekHarness.exe"
 $csc = "C:\Windows\Microsoft.NET\Framework64\v4.0.30319\csc.exe"
 if (-not (Test-Path $csc)) { $csc = (Get-Command csc -ErrorAction SilentlyContinue).Source }
 if (-not $csc) { throw "未找到 csc.exe（需要 .NET Framework 4.8，Windows 自带）" }
+
+# 把版本号注入 src\Version.cs，供应用内「检查更新」与 GitHub 最新版比对
+$versionCs = Join-Path $root "src\Version.cs"
+@"
+namespace DeepSeekHarness
+{
+    // 应用版本号，由 build.ps1 编译时按 -Version 注入，请勿手工修改。
+    internal static class AppInfo
+    {
+        public const string Version = "$Version";
+    }
+}
+"@ | Set-Content -Encoding utf8 -Path $versionCs
+
 & $csc /nologo /target:winexe /platform:x64 /optimize+ `
     "/win32icon:$root\icons\DeepSeekHarness.ico" `
     "/out:$dist\DeepSeekHarness.exe" `
     /r:System.dll /r:System.Core.dll /r:System.Drawing.dll /r:System.Windows.Forms.dll /r:System.Management.dll `
     "/r:$coreDll" `
     "/r:$lib\Microsoft.Web.WebView2.WinForms.dll" `
-    "$root\src\App.cs"
+    "$root\src\App.cs" "$versionCs"
 if ($LASTEXITCODE -ne 0) { throw "csc 编译失败" }
 Copy-Item -LiteralPath (Join-Path $root "icons\DeepSeekHarness.ico") -Destination (Join-Path $dist "DeepSeekHarness.ico") -Force
 

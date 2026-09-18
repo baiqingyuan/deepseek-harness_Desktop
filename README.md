@@ -9,10 +9,10 @@
 </p>
 
 <p align="center">
-  <a href="https://github.com/baiqingyuan/deepseek-harness/releases"><img src="https://img.shields.io/github/v/release/baiqingyuan/deepseek-harness" alt="GitHub Release"></a>
-  <a href="https://github.com/baiqingyuan/deepseek-harness/releases"><img src="https://img.shields.io/github/downloads/baiqingyuan/deepseek-harness/total" alt="Downloads"></a>
+  <a href="https://github.com/baiqingyuan/deepseek-harness_Desktop/releases"><img src="https://img.shields.io/github/v/release/baiqingyuan/deepseek-harness_Desktop" alt="GitHub Release"></a>
+  <a href="https://github.com/baiqingyuan/deepseek-harness_Desktop/releases"><img src="https://img.shields.io/github/downloads/baiqingyuan/deepseek-harness_Desktop/total" alt="Downloads"></a>
   <img src="https://img.shields.io/badge/platform-Windows%2010%2F11-0078D6" alt="Platform">
-  <a href="LICENSE"><img src="https://img.shields.io/github/license/baiqingyuan/deepseek-harness" alt="License"></a>
+  <a href="LICENSE"><img src="https://img.shields.io/github/license/baiqingyuan/deepseek-harness_Desktop" alt="License"></a>
 </p>
 
 > 底层是官方开源的 [DeepSeek Harness (dsh)](https://github.com/deepseek-ai/DeepSeek-Harness)（MIT），本项目为它提供一个原生 Windows 桌面壳（C# WinForms + WebView2）。
@@ -28,10 +28,11 @@
 - ✅ **零配置**：Windows 10/11 自带 .NET Framework 与 WebView2 运行时，无需额外安装
 - ✅ **自动修复依赖**：检测到 WebView2 运行时缺失时会弹窗引导一键下载并静默安装；node / dsh 文件被杀软误删或被占用端口时给出明确中文提示，不再黑话报错
 - ✅ **跟随上游**：自动适配新版 dsh 的浏览器鉴权（解析一次性 token URL），不会打开系统默认浏览器、界面只在本窗口内
+- ✅ **内置更新检查**：启动后静默查询 GitHub 最新版，有新版本托盘气泡提示（点击即升级）；也可随时右键托盘 → **「检查更新…」**，自动下载安装包并引导覆盖安装
 
 ## 📥 下载
 
-从 [Releases 页面](https://github.com/baiqingyuan/deepseek-harness/releases) 下载最新版：
+从 [Releases 页面](https://github.com/baiqingyuan/deepseek-harness_Desktop/releases) 下载最新版：
 
 - `DeepSeekHarness-Setup-vX.Y.Z-win-x64.exe`（**推荐**：双击按向导安装，自动创建桌面/开始菜单快捷方式，可在系统设置中一键卸载，无需管理员权限）
 - `DeepSeekHarness-Desktop-vX.Y.Z-win-x64.zip`（便携版，约 110 MB，解压即用）
@@ -42,7 +43,8 @@
 2. 或下载便携版 zip → 解压（整个文件夹一起解压）→ 双击 `install.bat` 一键创建快捷方式，也可直接双击 `DeepSeekHarness.exe` 运行。
 3. 首次打开在界面中配置你的 **DeepSeek API Key**
 4. 关闭窗口 = 最小化到系统托盘（服务继续运行）；**单击托盘图标**恢复窗口，右键「真正退出」才彻底停止
-5. 便携版如需卸载：运行 `uninstall.bat` 删除快捷方式，再删除整个文件夹即可
+5. **升级**：右键托盘 →「检查更新…」→ 按提示下载安装即可；有新版本时启动也会托盘提示一次（点气泡即可升级）
+6. 便携版如需卸载：运行 `uninstall.bat` 删除快捷方式，再删除整个文件夹即可
 
 **系统要求**：Windows 10/11 x64（内置 .NET Framework 4.8 与 WebView2 运行时）
 
@@ -66,7 +68,7 @@
 ## 🔄 与上游 / 官方桌面版
 
 - 上游仓库：[deepseek-ai/deepseek-harness](https://github.com/deepseek-ai/deepseek-harness)，CLI 包为 [`@deepseek-ai/dsh`](https://www.npmjs.com/package/@deepseek-ai/dsh)。本项目默认锁定其 npm `latest` 通道。
-- 上游已另有一个 **Electron 桌面版**（仓库内 `apps/desktop`，含自动更新与 Windows 安装包）。本项目定位是**极薄的 WinForms + WebView2 原生壳**：无 Electron 运行时、体积更小、随官方 npm 包一键升级；不提供自动更新。两者可并存，按需选择。
+- 上游已另有一个 **Electron 桌面版**（仓库内 `apps/desktop`，含自动更新与 Windows 安装包）。本项目定位是**极薄的 WinForms + WebView2 原生壳**：无 Electron 运行时、体积更小、随官方 npm 包一键升级；更新走轻量的「应用内检查 + 下载安装包覆盖」，而不是内置自动更新框架。两者可并存，按需选择。
 - 上游若发布破坏性变更（例如 Web 控制台鉴权方式变化），本项目的适配点集中在 `src/App.cs` 的服务启动与就绪检测部分。
 
 也可以直接用 GitHub Actions 一键发布（无需本机环境）：
@@ -78,6 +80,7 @@
 
 ```
 src/App.cs          桌面壳源码（C# WinForms + WebView2）
+src/Version.cs      版本号（由 build.ps1 编译时注入，用于「检查更新」）
 src/BUILD.md        手工编译说明
 build.ps1           一键构建（含 NSIS 安装包编译，缺失时自动下载 NSIS）
 package-release.ps1 打包 zip
@@ -91,6 +94,12 @@ dist/               构建产物（不入库）
 
 **Q：为什么杀毒软件/SmartScreen 有提示？**
 未签名的自包含 exe 首次运行可能触发 SmartScreen，点"更多信息 → 仍要运行"即可。长期使用可自行用代码签名证书签名。
+
+**Q：老版本怎么升级？**
+v0.4.0 及更早**没有内置更新入口**，需要手动下载一次 v0.5.0 安装包覆盖安装（安装程序会自动结束正在运行的应用，装到同一目录，配置与会话不会丢失）。装好之后，后续版本就能直接用托盘「检查更新…」一键升级。便携版（zip）用户请手动下载新 zip 解压覆盖。
+
+**Q：更新会丢配置吗？**
+不会。安装包覆盖的是程序文件，API Key 与会话数据存在用户目录（`%LOCALAPPDATA%` / dsh 的 home 目录），不会被安装程序删除。
 
 **Q：需要装 Node.js 吗？**
 不需要。发布包自带 `node.exe` 与全部依赖。
@@ -120,6 +129,6 @@ MIT，详见 [LICENSE](LICENSE)。
 - ✅ No Node.js / browser / CLI needed
 - ✅ Double-click to run; the local dsh service auto-starts, and closing the window only minimizes to tray (choose "Quit" in the tray menu to stop it)
 - ✅ Portable folder — copy it anywhere on Windows 10/11 x64
-- ⬇️ Download from [Releases](https://github.com/baiqingyuan/deepseek-harness/releases)
+- ⬇️ Download from [Releases](https://github.com/baiqingyuan/deepseek-harness_Desktop/releases)
 
 > This is a community wrapper, not affiliated with DeepSeek. The underlying Harness is MIT-licensed by DeepSeek AI.
