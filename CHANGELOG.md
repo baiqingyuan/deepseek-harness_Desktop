@@ -2,9 +2,26 @@
 
 本项目所有重要改动记录于此。格式参考 [Keep a Changelog](https://keepachangelog.com/)，版本号遵循 [语义化版本](https://semver.org/lang/zh-CN/)。
 
+## [0.7.1] - 2026-09-18
+
+> 修复 v0.7.0 的启动崩溃（双击后毫无反应）。**v0.7.0 无法启动，请升级到本版本。**
+
+### 修复 (Fixed)
+- **启动即崩溃（严重）**：v0.7.0 双击后进程立刻退出、无任何提示。`TrafficLight`/`ResizeGrip` 构造函数里 `BackColor = Color.Transparent` 写在了 `SetStyle(SupportsTransparentBackColor, true)` 之前，此时控件尚不支持透明背景，`Control.set_BackColor` 直接抛 `ArgumentException`；异常发生在主窗口构造函数中，进程启动即终止。现在改为先 `SetStyle` 再设背景色，交通灯直接使用导航栏底色，彻底不依赖透明背景机制。
+- **交通灯按钮被标题遮挡**：`Controls.Add` 是追加到集合末尾，而末尾在 z-order 中位于**最底层**。原先"先加的在底层"的注释是错的，导致铺满整栏的标题文字把后加的交通灯完全盖住——看不见也点不到。现在对交通灯与端口徽章显式 `BringToFront()`。
+- **窗口拖不动**：标题文字 `Dock.Fill` 铺满导航栏，鼠标事件被它吞掉，父容器 `titleBar` 收不到 `MouseDown`，拖动与双击最大化全部失效。现在拖动/双击同时挂到标题文字与端口徽章上。
+
+### 新增 (Added)
+- **崩溃日志**：新增 `Log` 类，未处理异常写入 `%LOCALAPPDATA%\DeepSeekHarness\logs\crash-*.log`；同时注册 `Application.ThreadException` 与 `AppDomain.UnhandledException`，出错时弹窗提示日志路径，不再静默退出。
+- **界面降级兜底**：自绘 iOS 界面初始化失败时自动退回系统边框普通窗口，保证"外观出问题"不会演变成"应用打不开"。
+- **字体回退**：`UI.MakeFont()` 在 Segoe UI 缺失时依次回退到微软雅黑 / 系统默认字体，避免精简系统上因字体导致构造失败。
+- **CI 启动冒烟测试**：`release.yml` 在构建后真实启动一次 exe，若进程在 15 秒内退出即阻断发布并打印崩溃堆栈——防住"编译通过但一运行就崩"的版本流出。
+
 ## [0.7.0] - 2026-09-18
 
 > 界面重做为 iOS 风格，并修掉了高 DPI 屏幕上整个界面发虚的问题。
+
+> ⚠️ **本版本存在启动崩溃，请勿使用，请直接下载 v0.7.1。**
 
 ### 修复 (Fixed)
 - **高 DPI 下界面模糊（画质）**：exe 此前没有声明 DPI 感知，Windows 在 125%/150% 缩放下会对整个窗口做位图拉伸（DWM 虚拟化），导致界面与 WebView2 里的网页内容一起发虚。现在嵌入 `src/app.manifest` 声明 `PerMonitorV2`，并在启动时调用 `Application.SetHighDpiMode(PerMonitorV2)`（反射探测，兼容旧版 .NET Framework），由应用按设备像素渲染，文字与网页恢复锐利。

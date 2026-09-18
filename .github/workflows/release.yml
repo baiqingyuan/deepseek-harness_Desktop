@@ -59,6 +59,27 @@ jobs:
         shell: pwsh
         run: ./build.ps1 -Version ${{ steps.ver.outputs.version }}
 
+      # 启动冒烟测试：编译通过 ≠ 能运行。
+      # v0.7.0 就是编译正常但构造界面时抛异常、进程秒退，用户双击毫无反应。
+      # 这里真跑一次 exe，若进程立刻消失就阻断发布，并打印崩溃堆栈。
+      - name: Smoke test (launch exe)
+        shell: pwsh
+        run: |
+          $exe = "dist/DeepSeekHarness/DeepSeekHarness.exe"
+          if (-not (Test-Path $exe)) { throw "未找到构建产物：$exe" }
+          $p = Start-Process -FilePath $exe -PassThru
+          Start-Sleep -Seconds 15
+          $alive = Get-Process -Id $p.Id -ErrorAction SilentlyContinue
+          if (-not $alive) {
+            Write-Host "::error::进程启动后立即退出（疑似启动崩溃）"
+            Get-WinEvent -FilterHashtable @{LogName='Application'; Level=1,2; StartTime=(Get-Date).AddMinutes(-3)} -ErrorAction SilentlyContinue |
+              Select-Object -First 4 | ForEach-Object { Write-Host "EVENT: $($_.ProviderName) $($_.Message)" }
+            throw "启动冒烟测试失败：进程在 15 秒内退出"
+          }
+          Write-Host "冒烟测试通过：进程存活，主窗口标题=[$($alive.MainWindowTitle)]"
+          Stop-Process -Id $p.Id -Force -ErrorAction SilentlyContinue
+          Get-Process -Name node -ErrorAction SilentlyContinue | Stop-Process -Force -ErrorAction SilentlyContinue
+
       - name: Package
         shell: pwsh
         run: ./package-release.ps1 -Version ${{ steps.ver.outputs.version }}

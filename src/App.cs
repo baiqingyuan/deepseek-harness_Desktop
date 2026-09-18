@@ -23,6 +23,28 @@ namespace DeepSeekHarness
         [STAThread]
         private static void Main()
         {
+            // 兜底：任何漏网的异常都要留下痕迹并提示，绝不能像 v0.7.0 那样
+            // 双击之后毫无反应地静默退出（用户完全不知道发生了什么）。
+            Application.ThreadException += delegate (object s, ThreadExceptionEventArgs e)
+            {
+                Log.Error("Application.ThreadException", e.Exception);
+                try
+                {
+                    MessageBox.Show(
+                        "DeepSeek Harness 遇到问题：\r\n\r\n" +
+                        (e.Exception == null ? "(未知)" : e.Exception.Message) +
+                        "\r\n\r\n详细日志：\r\n" + Log.DirectoryPath,
+                        "DeepSeek Harness", MessageBoxButtons.OK, MessageBoxIcon.Error);
+                }
+                catch { }
+            };
+            AppDomain.CurrentDomain.UnhandledException += delegate (object s, UnhandledExceptionEventArgs e)
+            {
+                Exception ex = e.ExceptionObject as Exception;
+                Log.Error("AppDomain.UnhandledException",
+                    ex ?? new Exception(Convert.ToString(e.ExceptionObject)));
+            };
+
             Application.EnableVisualStyles();
             Application.SetCompatibleTextRenderingDefault(false);
             // 让 WinForms 按每显示器 DPI 缩放（配合 src/app.manifest 的 PerMonitorV2 声明）。
@@ -43,9 +65,27 @@ namespace DeepSeekHarness
                 return;
             }
 
+            MainForm form;
             try
             {
-                Application.Run(new MainForm());
+                form = new MainForm();
+            }
+            catch (Exception ex)
+            {
+                Log.Error("MainForm 构造", ex);
+                try
+                {
+                    MessageBox.Show(
+                        "界面初始化失败：\r\n\r\n" + ex.Message +
+                        "\r\n\r\n详细日志：\r\n" + Log.DirectoryPath,
+                        "DeepSeek Harness", MessageBoxButtons.OK, MessageBoxIcon.Error);
+                }
+                catch { }
+                return;
+            }
+            try
+            {
+                Application.Run(form);
             }
             finally
             {
@@ -111,6 +151,51 @@ namespace DeepSeekHarness
         public const string FontName = "Segoe UI";                                   // Win11 为 Segoe UI Variable
         public const int TitleBarHeight = 44;                                        // iOS 导航栏高度
         public const int CornerRadius = 12;
+
+        // 精简/服务器版系统上可能没有 Segoe UI，new Font 会抛异常。
+        // 统一走这里，逐级回退，保证界面构造不会因为字体而失败。
+        public static Font MakeFont(float size, FontStyle style)
+        {
+            try { return new Font(FontName, size, style); }
+            catch { }
+            try { return new Font("Microsoft YaHei UI", size, style); }
+            catch { }
+            try { return new Font(SystemFonts.DefaultFont.FontFamily, size, style); }
+            catch { }
+            return SystemFonts.DefaultFont;
+        }
+
+        public static Font MakeFont(float size) { return MakeFont(size, FontStyle.Regular); }
+    }
+
+    // 崩溃日志：写进 %LOCALAPPDATA%\DeepSeekHarness\logs，便于排查"双击没反应"这类问题
+    internal static class Log
+    {
+        public static string DirectoryPath
+        {
+            get
+            {
+                return Path.Combine(
+                    Environment.GetFolderPath(Environment.SpecialFolder.LocalApplicationData),
+                    "DeepSeekHarness", "logs");
+            }
+        }
+
+        public static void Error(string where, Exception ex)
+        {
+            try
+            {
+                string dir = DirectoryPath;
+                Directory.CreateDirectory(dir);
+                string file = Path.Combine(dir,
+                    "crash-" + DateTime.Now.ToString("yyyyMMdd-HHmmss") + ".log");
+                File.WriteAllText(file,
+                    "DeepSeek Harness " + AppInfo.Version + "\r\n" +
+                    "时间: " + DateTime.Now.ToString("yyyy-MM-dd HH:mm:ss") + "\r\n" +
+                    "位置: " + where + "\r\n\r\n" + (ex == null ? "(无异常对象)" : ex.ToString()));
+            }
+            catch { }
+        }
     }
 
     internal sealed class MainForm : Form
@@ -197,16 +282,49 @@ namespace DeepSeekHarness
             // 无边框 + 自绘 iOS 风格导航栏（系统标题栏无法做成 iOS 的样子）
             FormBorderStyle = FormBorderStyle.None;
             AutoScaleMode = AutoScaleMode.Dpi;
-            Font = new Font(UI.FontName, 9f);
+            Font = UI.MakeFont(9f);
             try { Icon = Icon.ExtractAssociatedIcon(Application.ExecutablePath); } catch { }
 
-            BuildLoadingPlaceholder();
-            BuildTitleBar();
-            BuildResizeGrips();
+            // 自绘界面若失败，绝不能让应用打不开 —— 降级为系统边框窗口，功能照常可用
+            try
+            {
+                BuildLoadingPlaceholder();
+                BuildTitleBar();
+                BuildResizeGrips();
+            }
+            catch (Exception ex)
+            {
+                Log.Error("自绘界面初始化", ex);
+                FallbackChrome();
+            }
 
             InitializeTray();
 
             Shown += async delegate { await InitializeAsync(); };
+        }
+
+        // 自绘 iOS 界面初始化失败时的降级路径：退回普通系统窗口，宁可不好看也不能打不开
+        private void FallbackChrome()
+        {
+            try
+            {
+                for (int i = Controls.Count - 1; i >= 0; i--) Controls.RemoveAt(i);
+                grips = null;
+                titleBar = null;
+                titleLabel = null;
+                portBadge = null;
+                loadingCard = null;
+                loadingText = null;
+                FormBorderStyle = FormBorderStyle.Sizable;
+                Controls.Add(new Label
+                {
+                    Dock = DockStyle.Fill,
+                    TextAlign = ContentAlignment.MiddleCenter,
+                    Text = "正在启动 DeepSeek Harness 本地服务…",
+                    Font = SystemFonts.DefaultFont
+                });
+            }
+            catch { }
         }
 
         // ---------- iOS 风格窗口外观 ----------
@@ -288,16 +406,13 @@ namespace DeepSeekHarness
                 using (Pen p = new Pen(UI.Separator))
                     e.Graphics.DrawLine(p, 0, titleBar.Height - 1, titleBar.Width, titleBar.Height - 1);
             };
-            // 无边框窗口没有系统标题栏，鼠标按下时投递 HTCAPTION 模拟拖动
-            titleBar.MouseDown += delegate (object s, MouseEventArgs e)
-            {
-                if (e.Button == MouseButtons.Left && WindowState != FormWindowState.Maximized)
-                {
-                    ReleaseCapture();
-                    SendMessage(Handle, WM_NCLBUTTONDOWN, (IntPtr)HTCAPTION, IntPtr.Zero);
-                }
-            };
-            titleBar.MouseDoubleClick += delegate { ToggleMaximize(); };
+            // 无边框窗口没有系统标题栏，鼠标按下时投递 HTCAPTION 交给系统处理拖动。
+            // 标题文字是 Dock.Fill 铺满整条栏的，会挡住 titleBar 本身，所以拖动与双击
+            // 最大化必须同时挂到 titleLabel 上，否则窗口根本拖不动。
+            MouseEventHandler drag = delegate (object s, MouseEventArgs e) { BeginDrag(e); };
+            EventHandler dbl = delegate { ToggleMaximize(); };
+            titleBar.MouseDown += drag;
+            titleBar.MouseDoubleClick += dbl;
 
             int top = (UI.TitleBarHeight - 13) / 2;
             TrafficLight close = new TrafficLight(Color.FromArgb(255, 95, 87), TrafficLight.Glyph.Close)
@@ -316,27 +431,48 @@ namespace DeepSeekHarness
                 Dock = DockStyle.Fill,
                 TextAlign = ContentAlignment.MiddleCenter,
                 ForeColor = UI.Label,
-                Font = new Font(UI.FontName, 10f, FontStyle.Bold),
-                BackColor = Color.Transparent
+                Font = UI.MakeFont(10f, FontStyle.Bold),
+                BackColor = UI.Bar
             };
             portBadge = new Label
             {
                 Text = "127.0.0.1:" + port,
                 AutoSize = true,
                 ForeColor = UI.LabelSecondary,
-                Font = new Font(UI.FontName, 8.5f),
-                BackColor = Color.Transparent
+                Font = UI.MakeFont(8.5f),
+                BackColor = UI.Bar
             };
 
-            // 先加的在底层：标题铺满整条栏，交通灯与端口徽章浮在其上
+            titleLabel.MouseDown += drag;
+            titleLabel.MouseDoubleClick += dbl;
+            portBadge.MouseDown += drag;
+
             titleBar.Controls.Add(titleLabel);
             titleBar.Controls.Add(portBadge);
             titleBar.Controls.Add(close);
             titleBar.Controls.Add(min);
             titleBar.Controls.Add(max);
+            // Controls.Add 是追加到集合末尾，而末尾在 z-order 里是最底层。
+            // 所以后加的交通灯会被先加的 titleLabel（Dock.Fill）完全盖住，看不见也点不到，
+            // 必须显式 BringToFront —— 注释里"先加的在底层"是错的，实际恰好相反。
+            close.BringToFront();
+            min.BringToFront();
+            max.BringToFront();
+            portBadge.BringToFront();
+
             titleBar.Resize += delegate { LayoutBadge(); };
             Controls.Add(titleBar);
             LayoutBadge();
+        }
+
+        // 无边框窗口没有系统标题栏，鼠标按下时投递 HTCAPTION 交给系统处理拖动
+        private void BeginDrag(MouseEventArgs e)
+        {
+            if (e.Button == MouseButtons.Left && WindowState != FormWindowState.Maximized)
+            {
+                ReleaseCapture();
+                SendMessage(Handle, WM_NCLBUTTONDOWN, (IntPtr)HTCAPTION, IntPtr.Zero);
+            }
         }
 
         private void LayoutBadge()
@@ -374,7 +510,7 @@ namespace DeepSeekHarness
             Label title = new Label
             {
                 Text = "正在启动 DeepSeek Harness…",
-                Font = new Font(UI.FontName, 12f, FontStyle.Bold),
+                Font = UI.MakeFont(12f, FontStyle.Bold),
                 ForeColor = UI.Label,
                 Left = 20, Top = 30, Width = 400, Height = 28,
                 TextAlign = ContentAlignment.MiddleCenter,
@@ -383,7 +519,7 @@ namespace DeepSeekHarness
             loadingText = new Label
             {
                 Text = "首次启动需要几十秒，请稍候",
-                Font = new Font(UI.FontName, 9f),
+                Font = UI.MakeFont(9f),
                 ForeColor = UI.LabelSecondary,
                 Left = 20, Top = 68, Width = 400, Height = 24,
                 TextAlign = ContentAlignment.MiddleCenter,
@@ -1354,10 +1490,11 @@ namespace DeepSeekHarness
         {
             this.owner = owner;
             this.hitTest = hitTest;
-            BackColor = Color.Transparent;
-            Cursor = CursorFor(hitTest);
+            // 同上：先 SetStyle 再设 Transparent，顺序颠倒会抛 ArgumentException
             SetStyle(ControlStyles.UserPaint | ControlStyles.AllPaintingInWmPaint |
                      ControlStyles.OptimizedDoubleBuffer | ControlStyles.SupportsTransparentBackColor, true);
+            BackColor = Color.Transparent;
+            Cursor = CursorFor(hitTest);
         }
 
         private static Cursor CursorFor(int hit)
@@ -1399,11 +1536,15 @@ namespace DeepSeekHarness
         {
             baseColor = color;
             glyph = g;
-            Size = new Size(13, 13);
-            BackColor = Color.Transparent;
-            Cursor = Cursors.Hand;
+            // 顺序极其关键：必须先开启 SupportsTransparentBackColor，再设置背景色。
+            // 反过来的话 set_BackColor 会抛 ArgumentException —— 这正是 v0.7.0 启动即崩溃
+            // （双击没反应）的根因：异常发生在构造函数里，主窗口根本没机会显示出来。
             SetStyle(ControlStyles.UserPaint | ControlStyles.AllPaintingInWmPaint |
                      ControlStyles.OptimizedDoubleBuffer | ControlStyles.SupportsTransparentBackColor, true);
+            Size = new Size(13, 13);
+            // 直接用导航栏底色：视觉与透明一致，且不依赖透明背景机制，零风险
+            BackColor = UI.Bar;
+            Cursor = Cursors.Hand;
         }
 
         protected override void OnMouseEnter(EventArgs e) { hover = true; Invalidate(); base.OnMouseEnter(e); }
@@ -1418,7 +1559,7 @@ namespace DeepSeekHarness
 
             if (!hover) return;
             string symbol = glyph == Glyph.Close ? "×" : (glyph == Glyph.Minimize ? "–" : "+");
-            using (Font f = new Font(UI.FontName, 7.5f, FontStyle.Bold))
+            using (Font f = UI.MakeFont(7.5f, FontStyle.Bold))
             using (SolidBrush b = new SolidBrush(Color.FromArgb(110, 0, 0, 0)))
             using (StringFormat sf = new StringFormat
             { Alignment = StringAlignment.Center, LineAlignment = StringAlignment.Center })
