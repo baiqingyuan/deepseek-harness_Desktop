@@ -410,7 +410,8 @@ namespace DeepSeekHarness
             // 标题文字是 Dock.Fill 铺满整条栏的，会挡住 titleBar 本身，所以拖动与双击
             // 最大化必须同时挂到 titleLabel 上，否则窗口根本拖不动。
             MouseEventHandler drag = delegate (object s, MouseEventArgs e) { BeginDrag(e); };
-            EventHandler dbl = delegate { ToggleMaximize(); };
+            // MouseDoubleClick 的委托类型是 MouseEventHandler（带 MouseEventArgs），不是 EventHandler
+            MouseEventHandler dbl = delegate (object s, MouseEventArgs e) { ToggleMaximize(); };
             titleBar.MouseDown += drag;
             titleBar.MouseDoubleClick += dbl;
 
