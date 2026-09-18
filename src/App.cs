@@ -100,6 +100,11 @@ namespace DeepSeekHarness
         private bool trayExit;
         // 最近一次查到的可用更新（启动时静默检查发现后，点托盘气泡即可升级）
         private UpdateInfo pendingUpdate;
+        // 首选静态清单 latest.json（由 CI 随 Release 上传）。它走的是 release 资源下载域名，
+        // 不受 GitHub API 匿名限流（60 次/小时/IP）影响——同一出口 IP 下多人使用也能拿到更新。
+        private const string UpdateManifestUrl =
+            "https://github.com/baiqingyuan/deepseek-harness_Desktop/releases/latest/download/latest.json";
+        // 清单不可用（老版本 Release、网络拦截等）时回退到 API
         private const string UpdateApiUrl =
             "https://api.github.com/repos/baiqingyuan/deepseek-harness_Desktop/releases/latest";
         private const string ReleasesPageUrl =
@@ -719,6 +724,12 @@ namespace DeepSeekHarness
                 if (info == null) return;
                 if (!IsNewerVersion(info.Version, AppInfo.Version)) return;
                 pendingUpdate = info;
+                // 低于最低可用版本：直接弹窗要求升级，不能只靠气泡（用户可能根本不点）
+                if (info.Mandatory)
+                {
+                    await PromptUpdateAsync(info);
+                    return;
+                }
                 ShowBalloon("发现新版本 v" + info.Version + "，点击此处升级（或右键托盘选「检查更新…」）。",
                     ToolTipIcon.Info);
             }
@@ -761,11 +772,18 @@ namespace DeepSeekHarness
         {
             string notes = info.Notes;
             if (notes.Length > 600) notes = notes.Substring(0, 600) + "…";
+            string head = info.Mandatory
+                ? "当前版本 v" + AppInfo.Version + " 已停用，建议升级到 v" + info.Version + " 或更高版本。\r\n\r\n"
+                : "发现新版本 v" + info.Version + "（当前 v" + AppInfo.Version + "）\r\n\r\n";
+            string tail = info.Mandatory
+                ? "是否现在下载安装包并升级？\r\n（约 50 MB，下载后会关闭本应用并启动安装程序；\r\n选择「否」可稍后升级，但每次启动都会提醒）"
+                : "是否现在下载安装包并升级？\r\n（约 50 MB，下载后会关闭本应用并启动安装程序）";
             DialogResult r = MessageBox.Show(
-                "发现新版本 v" + info.Version + "（当前 v" + AppInfo.Version + "）\r\n\r\n" +
-                (string.IsNullOrEmpty(notes) ? "" : notes + "\r\n\r\n") +
-                "是否现在下载安装包并升级？\r\n（约 50 MB，下载后会关闭本应用并启动安装程序）",
-                "DeepSeek Harness 更新", MessageBoxButtons.YesNo, MessageBoxIcon.Information);
+                head +
+                (string.IsNullOrEmpty(notes) ? "" : notes + "\r\n\r\n") + tail,
+                "DeepSeek Harness 更新",
+                MessageBoxButtons.YesNo,
+                info.Mandatory ? MessageBoxIcon.Warning : MessageBoxIcon.Information);
             if (r != DialogResult.Yes) return;
             await DownloadAndInstallAsync(info);
         }
@@ -838,18 +856,69 @@ namespace DeepSeekHarness
             catch { }
         }
 
-        // 取 GitHub Releases 最新版信息；用正则抽取字段，避免为此引入 JSON 依赖
+        // 取最新版信息：先读静态清单 latest.json，拿不到再回退 GitHub API。
+        // 两者都用正则抽取字段，避免为此引入 JSON 依赖。
         private static async Task<UpdateInfo> FetchLatestReleaseAsync()
         {
             try { ServicePointManager.SecurityProtocol |= SecurityProtocolType.Tls12; } catch { }
-            string json;
+
+            UpdateInfo info = null;
+            try { info = await FetchManifestAsync(); }
+            catch { info = null; }
+            if (info != null) return info;
+
+            try { info = await FetchApiAsync(); }
+            catch { info = null; }
+            return info;
+        }
+
+        private static async Task<string> DownloadTextAsync(string url, string accept)
+        {
             using (WebClient wc = new WebClient())
             {
                 wc.Encoding = Encoding.UTF8;
                 wc.Headers.Add("User-Agent", "DeepSeekHarness-Desktop/" + AppInfo.Version);
-                wc.Headers.Add("Accept", "application/vnd.github+json");
-                json = await wc.DownloadStringTaskAsync(UpdateApiUrl);
+                if (!string.IsNullOrEmpty(accept)) wc.Headers.Add("Accept", accept);
+                return await wc.DownloadStringTaskAsync(url);
             }
+        }
+
+        // 静态清单：CI 随 Release 上传的 latest.json，无 API 限流
+        private static async Task<UpdateInfo> FetchManifestAsync()
+        {
+            string json = await DownloadTextAsync(UpdateManifestUrl, "application/json");
+            if (string.IsNullOrEmpty(json)) return null;
+
+            Match v = Regex.Match(json, "\"version\"\\s*:\\s*\"([^\"]+)\"");
+            if (!v.Success) return null;
+
+            UpdateInfo info = new UpdateInfo();
+            info.Version = v.Groups[1].Value.TrimStart('v', 'V');
+
+            Match min = Regex.Match(json, "\"minimumVersion\"\\s*:\\s*\"([^\"]*)\"");
+            info.MinimumVersion = min.Success ? min.Groups[1].Value.TrimStart('v', 'V') : "";
+
+            Match setup = Regex.Match(json, "\"installer\"\\s*:\\s*\\{[^{}]*\"url\"\\s*:\\s*\"([^\"]+)\"");
+            if (!setup.Success) setup = Regex.Match(json, "\"installerUrl\"\\s*:\\s*\"([^\"]+)\"");
+            info.InstallerUrl = setup.Success ? setup.Groups[1].Value : null;
+
+            Match zip = Regex.Match(json, "\"portable\"\\s*:\\s*\\{[^{}]*\"url\"\\s*:\\s*\"([^\"]+)\"");
+            if (!zip.Success) zip = Regex.Match(json, "\"portableUrl\"\\s*:\\s*\"([^\"]+)\"");
+            info.ZipUrl = zip.Success ? zip.Groups[1].Value : null;
+
+            Match page = Regex.Match(json, "\"page\"\\s*:\\s*\"([^\"]+)\"");
+            info.PageUrl = page.Success ? page.Groups[1].Value : ReleasesPageUrl;
+
+            info.Notes = ExtractJsonString(json, "notes");
+            info.Mandatory = !string.IsNullOrEmpty(info.MinimumVersion) &&
+                             IsNewerVersion(info.MinimumVersion, AppInfo.Version);
+            return info;
+        }
+
+        // 回退：GitHub Releases API（匿名 60 次/小时/IP，可能被限流）
+        private static async Task<UpdateInfo> FetchApiAsync()
+        {
+            string json = await DownloadTextAsync(UpdateApiUrl, "application/vnd.github+json");
             if (string.IsNullOrEmpty(json)) return null;
 
             Match tag = Regex.Match(json, "\"tag_name\"\\s*:\\s*\"([^\"]+)\"");
@@ -867,14 +936,18 @@ namespace DeepSeekHarness
             Match page = Regex.Match(json, "\"html_url\"\\s*:\\s*\"(https://github.com/[^\"]*releases/tag/[^\"]*)\"");
             info.PageUrl = page.Success ? page.Groups[1].Value : ReleasesPageUrl;
 
-            Match body = Regex.Match(json, "\"body\"\\s*:\\s*\"((?:[^\"\\\\]|\\\\.)*)\"");
-            if (body.Success)
-            {
-                try { info.Notes = Regex.Unescape(body.Groups[1].Value); }
-                catch { info.Notes = body.Groups[1].Value; }
-            }
-            else info.Notes = "";
+            info.Notes = ExtractJsonString(json, "body");
+            info.Mandatory = false; // API 不带 minimumVersion，无法判定强制升级
             return info;
+        }
+
+        // 从 JSON 文本里取出指定字符串字段的值（含转义还原），取不到返回空串
+        private static string ExtractJsonString(string json, string field)
+        {
+            Match m = Regex.Match(json, "\"" + field + "\"\\s*:\\s*\"((?:[^\"\\\\]|\\\\.)*)\"");
+            if (!m.Success) return "";
+            try { return Regex.Unescape(m.Groups[1].Value); }
+            catch { return m.Groups[1].Value; }
         }
 
         // 只比较数字部分，v0.5.0 / 0.5.0-beta 都能正确处理
@@ -910,6 +983,9 @@ namespace DeepSeekHarness
             public string InstallerUrl;
             public string ZipUrl;
             public string PageUrl = ReleasesPageUrl;
+            // 最低可用版本：低于它的客户端被要求必须升级（最低版本本身不算必须升级）
+            public string MinimumVersion = "";
+            public bool Mandatory;
         }
     }
 

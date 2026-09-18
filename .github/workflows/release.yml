@@ -119,8 +119,66 @@ jobs:
             }
           }
           if ([string]::IsNullOrWhiteSpace($body)) { $body = "详见 CHANGELOG.md" }
+          # 同时落盘，供下一步生成 latest.json 复用（多行正文不适合直接插进后续步骤的脚本）
+          [System.IO.File]::WriteAllText(
+            (Join-Path $env:RUNNER_TEMP "rel-notes.md"), $body,
+            (New-Object System.Text.UTF8Encoding($false)))
           $delim = "NOTES_EOF"
           @("body<<$delim", $body, $delim) | Out-File -Append -FilePath $env:GITHUB_OUTPUT -Encoding utf8
+
+      - name: Generate latest.json (update manifest)
+        # 客户端的更新检查优先读这份静态清单，而不是 GitHub API：
+        # release 资源下载域名没有匿名 API 限流（60 次/小时/IP），同一出口 IP 下多人使用也能拿到更新。
+        shell: pwsh
+        env:
+          REL_VERSION: ${{ steps.ver.outputs.version }}
+        run: |
+          $v = $env:REL_VERSION
+          $repo = "${{ github.repository }}"
+          $tag = "v$v"
+          $base = "https://github.com/$repo/releases/download/$tag"
+          $setupName = "DeepSeekHarness-Setup-v$v-win-x64.exe"
+          $zipName   = "DeepSeekHarness-Desktop-v$v-win-x64.zip"
+
+          $setupItem = Get-Item "dist/$setupName" -ErrorAction SilentlyContinue
+          $zipItem   = Get-Item "dist/$zipName"   -ErrorAction SilentlyContinue
+
+          $notes = ""
+          $notesFile = Join-Path $env:RUNNER_TEMP "rel-notes.md"
+          if (Test-Path $notesFile) { $notes = (Get-Content -LiteralPath $notesFile -Raw -Encoding UTF8).Trim() }
+
+          # 可选「最低可用版本」：需要强制老客户端升级时，在仓库根放一行版本号（如 0.6.0）。
+          # 低于它的客户端每次启动都会弹窗要求升级；文件不存在或内容非法则视为不限制。
+          $minVersion = $null
+          if (Test-Path "minimum-version.txt") {
+            $t = (Get-Content -LiteralPath "minimum-version.txt" -Raw).Trim()
+            if ($t -match '^\d+(\.\d+)*$') { $minVersion = $t }
+          }
+
+          $installer = $null
+          if ($setupItem) {
+            $installer = [ordered]@{ url = "$base/$setupName"; name = $setupName; size = $setupItem.Length }
+          }
+          $portable = $null
+          if ($zipItem) {
+            $portable = [ordered]@{ url = "$base/$zipName"; name = $zipName; size = $zipItem.Length }
+          }
+
+          $manifest = [ordered]@{
+            version        = $v
+            minimumVersion = $minVersion
+            publishedAt    = (Get-Date).ToUniversalTime().ToString("yyyy-MM-ddTHH:mm:ssZ")
+            notes          = $notes
+            page           = "https://github.com/$repo/releases/tag/$tag"
+            installer      = $installer
+            portable       = $portable
+          }
+          $json = $manifest | ConvertTo-Json -Depth 5
+          [System.IO.File]::WriteAllText(
+            "dist/latest.json", $json,
+            (New-Object System.Text.UTF8Encoding($false)))
+          Write-Host "latest.json:"
+          Write-Host $json
 
       - name: Upload release assets
         uses: softprops/action-gh-release@v2
@@ -129,3 +187,4 @@ jobs:
           files: |
             dist/DeepSeekHarness-Desktop-*.zip
             dist/DeepSeekHarness-Setup-*.exe
+            dist/latest.json
