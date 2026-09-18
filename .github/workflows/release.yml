@@ -95,9 +95,37 @@ jobs:
           # SignPath 把签名结果下载到 signed/，覆盖回 dist/，后续发布步骤复用同一路径
           Copy-Item -Path "signed/dist/*" -Destination "dist/" -Recurse -Force
 
+      - name: Build release notes from CHANGELOG
+        id: notes
+        shell: pwsh
+        env:
+          REL_VERSION: ${{ steps.ver.outputs.version }}
+        run: |
+          # 从 CHANGELOG.md 取出当前版本那一段作为 Release 说明（以前每次 Release 说明都是空的）。
+          $v = $env:REL_VERSION
+          $body = ""
+          if (Test-Path "CHANGELOG.md") {
+            $lines = Get-Content -LiteralPath "CHANGELOG.md" -Encoding UTF8
+            $start = -1
+            for ($i = 0; $i -lt $lines.Count; $i++) {
+              if ($lines[$i] -match ("^##\s+\[?" + [regex]::Escape($v) + "\b")) { $start = $i + 1; break }
+            }
+            if ($start -ge 0) {
+              $end = $lines.Count
+              for ($j = $start; $j -lt $lines.Count; $j++) {
+                if ($lines[$j] -match "^##\s+") { $end = $j; break }
+              }
+              $body = ($lines[$start..($end - 1)] -join "`n").Trim()
+            }
+          }
+          if ([string]::IsNullOrWhiteSpace($body)) { $body = "详见 CHANGELOG.md" }
+          $delim = "NOTES_EOF"
+          @("body<<$delim", $body, $delim) | Out-File -Append -FilePath $env:GITHUB_OUTPUT -Encoding utf8
+
       - name: Upload release assets
         uses: softprops/action-gh-release@v2
         with:
+          body: ${{ steps.notes.outputs.body }}
           files: |
             dist/DeepSeekHarness-Desktop-*.zip
             dist/DeepSeekHarness-Setup-*.exe
