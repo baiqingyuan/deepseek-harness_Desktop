@@ -78,7 +78,10 @@ namespace DeepSeekHarness
 
     internal sealed class MainForm : Form
     {
-        private const int Port = 3080;
+        private const int DefaultPort = 3080;
+        // 首选 3080；被其它程序占用时会自动换一个空闲端口（见 StartServerIfNeededAsync）
+        private int port = DefaultPort;
+        private string portNotice;
         private readonly string baseDir;
         private readonly string nodePath;
         private readonly string dshPath;
@@ -135,6 +138,7 @@ namespace DeepSeekHarness
                 string startUrl = await StartServerIfNeededAsync();
                 if (shuttingDown) return;
                 await InitializeWebViewAsync(startUrl);
+                if (!string.IsNullOrEmpty(portNotice)) ShowBalloon(portNotice, ToolTipIcon.Info);
             }
             catch (Exception ex)
             {
@@ -282,11 +286,16 @@ namespace DeepSeekHarness
         {
             // 端口已被占用：先尝试停掉"本目录 dsh"的残留进程再重新拉起，
             // 因为新版 dsh 需要本次进程的一次性 token，接管旧进程拿不到。
-            if (IsPortOpen(Port))
+            if (IsPortOpen(port))
             {
                 bool stopped = await StopOwnedServerAsync();
                 if (!stopped)
-                    throw new Exception("端口 " + Port + " 已被其他程序占用，无法启动本地服务。\n请关闭占用该端口的程序后重试。");
+                {
+                    // 3080 被别的程序占用时不再直接放弃启动：换一个空闲端口继续，
+                    // 只在托盘提示一次，减少「打不开」这类求助。
+                    port = FindFreePort();
+                    portNotice = "端口 " + DefaultPort + " 已被其它程序占用，本次改用端口 " + port + "。";
+                }
             }
 
             if (!File.Exists(nodePath))
@@ -297,11 +306,11 @@ namespace DeepSeekHarness
             ProcessStartInfo psi = new ProcessStartInfo();
             psi.FileName = nodePath;
             // --no-open：不额外打开系统默认浏览器（界面由本窗口承载）
-            // --port：显式固定端口，与 Port 常量保持一致
-            psi.Arguments = "\"" + dshPath + "\" web --no-open --port " + Port;
+            // --port：显式固定端口，与 port 字段保持一致
+            psi.Arguments = "\"" + dshPath + "\" web --no-open --port " + port;
             psi.WorkingDirectory = baseDir;
             psi.UseShellExecute = false;
-            // 保留（隐藏的）控制台：退出时才能用 Ctrl+Break 让 dsh 优雅排空插件树
+            // 保留（隐藏的）控制台：退出时才能投递 Ctrl+C，让 dsh 走官方的优雅关闭路径
             psi.CreateNoWindow = false;
             psi.WindowStyle = ProcessWindowStyle.Hidden;
             psi.RedirectStandardOutput = true;
@@ -331,6 +340,9 @@ namespace DeepSeekHarness
             };
             serverProc.BeginOutputReadLine();
             serverProc.BeginErrorReadLine();
+            // dsh 崩溃或被拦截时给个提示，避免用户对着一个已经失效的界面发呆。
+            serverProc.EnableRaisingEvents = true;
+            serverProc.Exited += OnServerExited;
 
             return await WaitForReadyUrlAsync();
         }
@@ -357,11 +369,11 @@ namespace DeepSeekHarness
                     throw new Exception("dsh 服务进程已退出。" + ErrorTailText());
                 if (readyUrlSource.Task.IsCompleted) return readyUrlSource.Task.Result;
 
-                bool open = IsPortOpen(Port);
+                bool open = IsPortOpen(port);
                 if (open && portOpenAt == DateTime.MinValue) portOpenAt = DateTime.UtcNow;
                 if (open && portOpenAt != DateTime.MinValue &&
                     DateTime.UtcNow - portOpenAt > TimeSpan.FromSeconds(10))
-                    return "http://127.0.0.1:" + Port + "/";
+                    return "http://127.0.0.1:" + port + "/";
 
                 if (DateTime.UtcNow - start > TimeSpan.FromSeconds(90))
                     throw new Exception("等待 dsh 服务就绪超时（90 秒）。" + ErrorTailText());
@@ -379,6 +391,30 @@ namespace DeepSeekHarness
             }
         }
 
+        // dsh 进程意外退出（崩溃 / 被杀软拦截）时提示一次。
+        private void OnServerExited(object sender, EventArgs e)
+        {
+            // 启动阶段失败由 InitializeAsync 的错误弹窗负责，这里只管「已经用起来之后又挂了」
+            if (shuttingDown || webView == null) return;
+            try
+            {
+                BeginInvoke(new Action(() =>
+                {
+                    if (shuttingDown || IsDisposed) return;
+                    ShowBalloon("本地 dsh 服务已退出，界面将无法继续使用。\n请通过托盘图标「真正退出」后重新启动应用。",
+                        ToolTipIcon.Warning);
+                }));
+            }
+            catch { }
+        }
+
+        private void ShowBalloon(string text, ToolTipIcon icon)
+        {
+            if (trayIcon == null) return;
+            try { trayIcon.ShowBalloonTip(5000, "DeepSeek Harness", text, icon); }
+            catch { }
+        }
+
         // 找到并停掉"本目录 dsh"残留的服务进程（例如上次异常退出遗留的 node.exe）。
         private async Task<bool> StopOwnedServerAsync()
         {
@@ -388,9 +424,18 @@ namespace DeepSeekHarness
             for (int i = 0; i < 24; i++)
             {
                 await Task.Delay(500);
-                if (!IsPortOpen(Port)) return true;
+                if (!IsPortOpen(port)) return true;
             }
-            return !IsPortOpen(Port);
+            return !IsPortOpen(port);
+        }
+
+        // 取一个当前空闲的回环端口（端口 0 让系统分配，随即释放）。
+        private static int FindFreePort()
+        {
+            TcpListener listener = new TcpListener(IPAddress.Loopback, 0);
+            listener.Start();
+            try { return ((IPEndPoint)listener.LocalEndpoint).Port; }
+            finally { listener.Stop(); }
         }
 
         private int FindOwnedServerPid()
