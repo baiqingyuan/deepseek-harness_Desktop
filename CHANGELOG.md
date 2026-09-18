@@ -24,17 +24,17 @@
 - **构建缓存按版本失效**：`dist/_dsh-build` 增加版本戳，切换 dsh 版本时自动清理旧的 `node_modules`，避免装错版本。
 - **pnpm 构建白名单对齐上游**：`koffi` / `node-pty` / `@deepseek-ai/dsh-subprocess-local` 允许，`@google/genai` / `protobufjs` / `node-addon-require-builtin` 显式拒绝；另加一次 `dangerouslyAllowAllBuilds` 兜底重试，减少升级 dsh 时的安装失败。
 - **使用说明同步**：内置说明改为「关窗 = 最小化到托盘，服务继续运行；真正退出才停止」，并标注内置 dsh 版本。
+- **托盘恢复改为单击**：原需双击托盘图标或右键「显示主界面」才能恢复窗口，现改为**单击托盘图标**即可恢复，更顺手；右键菜单仍保留「显示主界面 / 真正退出」。
+
+### 安全 / 构建 (Security / Build)
+- **CI 接入 SignPath 免费代码签名**：`release.yml` 在构建出 `Setup.exe` 后新增签名步骤（上传产物 → 提交 SignPath 签名 → 回写 `dist/`）。仅在仓库配置 `SIGNPATH_API_TOKEN` 等 Secrets 时生效，未配置则自动跳过、照常发布未签名包，不破坏现有流程。签名后 `Setup.exe` 由「未知发布者」升级为受 Windows 信任的 OV 证书（发布者显示为 SignPath Foundation）。
 
 ### 文档 (Docs)
 - README 补充「与上游 / 官方桌面版」章节：说明上游已另有一个 Electron 桌面版（`apps/desktop`），本项目定位为更轻的 WinForms + WebView2 薄壳。
 
 ## [Unreleased]
 
-### 变更 (Changed)
-- **托盘恢复改为单击**：原需双击托盘图标或右键「显示主界面」才能恢复窗口，现改为**单击托盘图标**即可恢复，更顺手；右键菜单仍保留「显示主界面 / 真正退出」。
-
-### 安全 / 构建 (Security / Build)
-- **CI 接入 SignPath 免费代码签名**：`release.yml` 在构建出 `Setup.exe` 后新增签名步骤（上传产物 → 提交 SignPath 签名 → 回写 `dist/`）。仅在仓库配置 `SIGNPATH_API_TOKEN` 等 Secrets 时生效，未配置则自动跳过、照常发布未签名包，不破坏现有流程。签名后 `Setup.exe` 由「未知发布者」升级为受 Windows 信任的 OV 证书（发布者显示为 SignPath Foundation）。
+_暂无。_
 
 ## [0.3.0] - 2026-08-16
 
