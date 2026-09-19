@@ -481,32 +481,40 @@ namespace DeepSeekHarness
   }
   return false;
  }
- // 窗口按钮固定钉死在右上角，绝不移动（之前按网页控件位置动态避让，点工作区/三个点
- // 弹出菜单后几何一变按钮就跟着回弹，观感很差）。让位改为反向操作：给 dsh 头部容器
- // 注入右内边距，把网页自己的右上角控件往左推，永远腾出三个按钮的宽度。
+ // 窗口按钮固定钉死在右上角，绝不移动。让位改为反向操作：把 dsh 头部右上角的
+ // 控件（工作区▾ / 三个点 / 右侧栏 等）整体向左平移，正好落在窗口按钮左侧，
+ // 两边各就各位。用 transform 平移而非改布局：不会被容器的 overflow 裁剪、
+ // 也不会被绝对定位忽略（v0.8.9 的 padding-right 方案就是把控件推没了）。
  // 只查这一小组选择器（不是全树遍历），配合节流不会重蹈 v0.8.2 的重排风暴。
- var CAP_W=140; // 3 个按钮 × 46px，留 2px 余量
+ var CAP_W=140; // 3 个窗口按钮 × 46px，留 2px 余量
  function reserve(){
   var box=document.getElementById(BOX);
   var cands=document.querySelectorAll(
    'button,a,[role=button],[class*=button],[class*=Button],[class*=trigger],[class*=Trigger],[class*=icon],[class*=Icon]');
   var w=window.innerWidth;
+  var tops=[];
   for(var i=0;i<cands.length;i++){
    var el=cands[i];
    if(box&&box.contains(el)) continue;
    var r=el.getBoundingClientRect();
    if(r.width<10||r.width>180||r.height<12||r.height>72) continue;
    if(r.top>56||r.bottom<0) continue;
-   if(r.right<w-280) continue; // 只看最右 280px 内的顶部控件
-   // 直接给控件的父容器注入右内边距：flex 行内子项必然被推向左边，
-   // 不依赖高层祖先是否传递 padding（v0.8.7 就是因此漏推、仍然重叠）
-   var p=el.parentElement;
-   if(p&&!p.__dshPad){
-    p.__dshPad=true;
-    p.style.paddingRight=CAP_W+'px';
-    p.style.boxSizing='border-box';
-   }
-   break;
+   if(r.right<w-290) continue; // 只看最右 290px 内的顶部控件
+   tops.push(el);
+  }
+  if(tops.length===0) return;
+  // 找这些控件的最小公共祖先（即 dsh 的头部门控件容器），整组向左平移
+  var anc=tops[0].parentElement, guard=0;
+  while(anc&&guard++<12){
+   var cnt=0;
+   for(var k=0;k<tops.length;k++){ if(anc.contains(tops[k])) cnt++; }
+   if(cnt>=2) break; // 至少包住其中两个；菜单展开时只有一个可见也照样生效
+   anc=anc.parentElement;
+  }
+  if(anc&&!anc.__dshShift){
+   anc.__dshShift=true;
+   anc.style.transform='translateX(-'+CAP_W+'px)';
+   anc.style.transformOrigin='right center';
   }
  }
  function place(){
