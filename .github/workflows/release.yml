@@ -93,6 +93,17 @@ jobs:
           }
           gh issue create --title $title --body-file issue-body.md
 
+      - name: Close stale build-failure issues
+        # 构建成功后把之前自动开的「CI 构建失败」issue 关掉，避免堆积噪音。
+        if: success()
+        shell: pwsh
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          $ids = gh issue list --state open --search "CI 构建失败 in:title" --json number --jq ".[].number"
+          foreach ($id in $ids) { gh issue close $id }
+          if ($ids) { Write-Host "closed issues: $ids" }
+
       # 启动冒烟测试：编译通过 ≠ 能运行。
       # v0.7.0 就是编译正常但构造界面时抛异常、进程秒退，用户双击毫无反应。
       # 这里真跑一次 exe，若进程立刻消失就阻断发布，并打印崩溃堆栈。

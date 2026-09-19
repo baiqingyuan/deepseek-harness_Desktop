@@ -826,6 +826,7 @@ namespace DeepSeekHarness
             Exception last = null;
             for (int attempt = 1; attempt <= 3; attempt++)
             {
+                bool retry = false;
                 try
                 {
                     CoreWebView2Environment env = null;
@@ -843,8 +844,12 @@ namespace DeepSeekHarness
                 {
                     last = ex;
                     envTask = null; // 环境创建失败过一次，下次重新建
-                    if (attempt < 3) await Task.Delay(2000 * attempt);
+                    retry = attempt < 3;
                 }
+                // 注意：await 不能写在 catch 块里 —— CI 用的 .NET Framework 自带编译器
+                // 语言版本较老（CS1985: Cannot await in the body of a catch clause），
+                // 所以重试前的等待必须挪到 catch 外面。
+                if (retry) await Task.Delay(2000 * attempt);
             }
             throw last;
         }
@@ -1619,7 +1624,14 @@ namespace DeepSeekHarness
 
             try
             {
-                Process.Start(new ProcessStartInfo(file) { UseShellExecute = true, Arguments = "/S" });
+                // /S 静默；/D= 必须是最后一个参数且不能加引号（即使路径含空格），
+                // 显式指定原安装目录 —— 否则静默安装可能装到默认路径，桌面快捷方式就会
+                // 继续指向旧目录，出现「更新了但打开的还是旧版本」。
+                Process.Start(new ProcessStartInfo(file)
+                {
+                    UseShellExecute = true,
+                    Arguments = "/S /D=" + Application.StartupPath
+                });
             }
             catch (Exception ex)
             {

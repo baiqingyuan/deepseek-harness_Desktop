@@ -25,6 +25,8 @@
 Name "${APP_NAME}"
 OutFile "${OUT}"
 InstallDir "$LOCALAPPDATA\DeepSeekHarness"
+; 覆盖安装时沿用上次的安装目录：客户端更新传 /D= 之外，手动静默运行也能装回原处
+InstallDirRegKey HKCU "Software\Microsoft\Windows\CurrentVersion\Uninstall\${APP_NAME}" "InstallLocation"
 RequestExecutionLevel user
 Unicode True
 SetCompressor /SOLID lzma
@@ -69,6 +71,7 @@ Section "Main" SecMain
   WriteRegStr HKCU "Software\Microsoft\Windows\CurrentVersion\Uninstall\${APP_NAME}" "DisplayIcon" "$INSTDIR\DeepSeekHarness.ico"
   WriteRegStr HKCU "Software\Microsoft\Windows\CurrentVersion\Uninstall\${APP_NAME}" "Publisher" "DeepSeek Harness Desktop"
   WriteRegStr HKCU "Software\Microsoft\Windows\CurrentVersion\Uninstall\${APP_NAME}" "DisplayVersion" "${VERSION}"
+  WriteRegStr HKCU "Software\Microsoft\Windows\CurrentVersion\Uninstall\${APP_NAME}" "InstallLocation" "$INSTDIR"
   WriteRegDWORD HKCU "Software\Microsoft\Windows\CurrentVersion\Uninstall\${APP_NAME}" "NoModify" 1
   WriteRegDWORD HKCU "Software\Microsoft\Windows\CurrentVersion\Uninstall\${APP_NAME}" "NoRepair" 1
 SectionEnd
