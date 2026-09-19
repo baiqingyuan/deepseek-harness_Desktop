@@ -422,8 +422,6 @@ namespace DeepSeekHarness
  }
  function tick(){
   lastRun=Date.now(); pending=false;
-  // 一体化标题栏的窗口按钮跟着网页布局重定位（侧边栏/标签页变化、窗口缩放等）
-  try{ if(window.__dshCaptionPlace) window.__dshCaptionPlace(); }catch(e){}
   var b=document.getElementById(BTN);
   if(!b){ style(); b=build(); }
   // 侧边栏不在（收起/隐藏）或官方原生更新入口存在：按钮一律隐藏
@@ -455,256 +453,19 @@ namespace DeepSeekHarness
 })();
 
 (function(){
- // 一体化标题栏：桌面壳的窗口控制融进网页头部，不再有独立的内外两道框。
- // 1) 右上角固定三个窗口按钮（最小化 / 最大化 / 关闭），颜色继承网页主题（深浅色自适应）；
- // 2) 顶部空白区按下拖动窗口、双击最大化 —— 用文档级捕获监听转发给桌面壳，
- //    不叠加任何遮挡层，网页头部自己的按钮（侧边栏开关、标签页等）照常可点；
- // 3) 注入完成上报 dsh-chrome-ready，桌面壳收到后隐藏自己的兜底标题栏。
- if (window.__dshChromeReady) return;
- if (window.top !== window) return; // 只在顶层文档注入，iframe 里不生成窗口按钮
- window.__dshChromeReady = true;
- var BOX='dsh-desktop-caption';
- var DRAG_H=44;
- function post(m){ try{ window.chrome.webview.postMessage(m); }catch(e){} }
- function svg(tag,attrs){
-  var e=document.createElementNS('http://www.w3.org/2000/svg',tag);
-  for(var k in attrs){ if(attrs.hasOwnProperty(k)) e.setAttribute(k,attrs[k]); }
-  return e;
- }
- function drawMax(s,maxed){
-  while(s.firstChild) s.removeChild(s.firstChild);
-  if(maxed){
-   // 还原图标：两个错开的小方框
-   s.appendChild(svg('rect',{x:2.5,y:0.5,width:7,height:7,stroke:'currentColor','stroke-width':1,fill:'none'}));
-   s.appendChild(svg('rect',{x:0.5,y:2.5,width:7,height:7,stroke:'currentColor','stroke-width':1,fill:'none'}));
-  }else{
-   s.appendChild(svg('rect',{x:0.5,y:0.5,width:9,height:9,stroke:'currentColor','stroke-width':1,fill:'none'}));
-  }
- }
- function icon(kind){
-  var s=svg('svg',{width:10,height:10,viewBox:'0 0 10 10'});
-  if(kind==='min'){
-   s.appendChild(svg('path',{d:'M0 7.5 H10',stroke:'currentColor','stroke-width':1,fill:'none'}));
-  }else if(kind==='max'){
-   drawMax(s,false);
-  }else{
-   s.appendChild(svg('path',{d:'M0 0 L10 10 M10 0 L0 10',stroke:'currentColor','stroke-width':1,fill:'none'}));
-  }
-  return s;
- }
- function interactive(t){
-  if(t && t.closest){
-   if(t.closest('button,a,input,textarea,select,label,[role=button],[contenteditable],iframe,object,embed,video')) return true;
-   if(t.closest('#'+BOX)) return true;
-  }
-  return false;
- }
- // 窗口按钮固定钉死在右上角，绝不移动。让位方案演进：
- // - 水平方向折腾全都有副作用：padding 被 overflow 裁剪（v0.8.9）、translateX 平移整条
- //   头部致侧边栏错位（v0.8.10）、占位元素推不动绝对定位控件（v0.8.11）、整组水平左移
- //   会把下拉菜单和相邻按钮一起拽走，视觉与热区错乱（v0.8.13）。
- // - v0.8.14 起改为**垂直让位**：与窗口按钮区域重叠的顶部控件，作为一组按同一位移
- //   **整体下移**到窗口按钮正下方。x 坐标完全不动 → 水平间距、对齐关系天然不乱；
- //   下拉菜单从按钮自身位置弹出，也不会错位。每轮先还原再重算，布局变化不残留。
- // - v0.8.16：下移后必须抬升层叠顺序（z-index + 定位），否则会被同级透明覆盖层压住 ——
- //   表现为图标看得见但 hover / 点击完全没反应（像「按键不存在」）；同时按原始行分行、
- //   逐行依次下移堆叠，避免应用头部与面板头部两组控件被推到同一基线上互相遮挡。
- var overlapMoved=[];
- function isPopup(el){
-  // 弹层（菜单/提示/气泡）跟着触发器走，不参与下移，否则菜单文字会错位
-  for(var p=el,guard=0;p&&guard++<8;p=p.parentElement){
-   if(p===document.body) break;
-   var c=p.className||'';
-   var cstr=(typeof c==='string')?c:(c.baseVal||'');
-   if(/(menu|Menu|popover|Popover|dropdown|Dropdown|tooltip|Tooltip|toast|Toast|popup|Popup|float|Float)/.test(cstr)) return true;
-   var role=p.getAttribute&&p.getAttribute('role');
-   if(role==='menu'||role==='tooltip'||role==='dialog'||role==='listbox') return true;
-  }
-  return false;
- }
- function restoreMoved(){
-  for(var j=0;j<overlapMoved.length;j++){
-   var m=overlapMoved[j];
-   m.el.style.transform='';
-   m.el.style.zIndex=m.z;
-   m.el.style.position=m.pos;
-  }
-  overlapMoved.length=0;
- }
- // 命中元素 → 控件整体单元：向上找紧贴的容器，这样「图标 + 圆角外框 + 下拉箭头」作为
- // 整体一起移动，不会留下空方框。放宽到 200px / 高 +28px，是因为拆分按钮（图标 + 下拉
- // 箭头）比内部按钮宽得多，太严的紧贴条件爬不到它的外框容器。被套住的其它命中控件由
- // 后面的「去内层」步骤合并 —— 内层单独的下移会被丢弃，不会再叠加位移。
- function unitOf(el,hits){
-  var best=el, cur=el;
-  for(var g=0;g<6;g++){
-   var p=cur.parentElement;
-   if(!p||p===document.body||p===document.documentElement) break;
-   var pr=p.getBoundingClientRect();
-   var cr=cur.getBoundingClientRect();
-   if(pr.width<8||pr.height<8) break;
-   if(pr.width>200||pr.width>window.innerWidth*0.6) break; // 到整行/大容器就停
-   if(pr.height>cr.height+28) break;
-   if(pr.width>Math.max(cr.width*3,cr.width+90)) break;
-   best=p; cur=p;
-  }
-  return best;
- }
- // 所有命中控件的最近共同祖先：右上角这一组控件通常有一个共同容器（含外框、图标、
- // 下拉箭头），整体下移它最干净 —— 组内一切（包括不属于命中的外框）都跟着走，绝不残留。
- function commonAncestor(list){
-  if(!list||!list.length) return null;
-  var a=list[0];
-  for(var i=1;i<list.length;i++){
-   while(a&&!a.contains(list[i])) a=a.parentElement;
-   if(!a) return null;
-  }
-  return a;
- }
- function lift(el){
-  if(getComputedStyle(el).position==='static') el.style.position='relative';
-  el.style.zIndex='60';
- }
- function clearOverlap(){
-  var box=document.getElementById(BOX);
-  if(!box) return;
-  restoreMoved();
-  // 清理 v0.8.11-0.8.13 遗留的占位元素
-  var sp=document.getElementById('dsh-cap-spacer');
-  if(sp&&sp.parentNode) sp.parentNode.removeChild(sp);
-  var br=box.getBoundingClientRect();
-  if(br.width===0) return;
-  var cands=document.querySelectorAll(
-   'button,a,[role=button],[class*=button],[class*=Button],[class*=trigger],[class*=Trigger],[class*=icon],[class*=Icon]');
-  var hits=null;
-  for(var i=0;i<cands.length;i++){
-   var el=cands[i];
-   if(box.contains(el)) continue;
-   if(isPopup(el)) continue;
-   var r=el.getBoundingClientRect();
-   if(r.width<6||r.height<10) continue;
-   if(r.top>56||r.bottom<0) continue; // 只处理贴顶一行的控件
-   if(r.right>br.left+2&&r.left<br.right-2){ // 与窗口按钮区重叠
-    if(!hits) hits=[];
-    hits.push(el);
-   }
-  }
-  if(!hits) return;
-  // 先把命中元素收敛成「控件整体单元」：命中点常是按钮内部的一层，而按钮的圆角外框
-  // 属于更外层的容器。只移内层 → 外框留在原地变成空方框、图标却跑到别处（v0.8.16）。
-  // 因此向上找紧贴、尺寸几乎相同、且不包含其他命中控件的祖先，把它作为整体一起移。
-  var units=[];
-  for(var a=0;a<hits.length;a++){
-   var u=unitOf(hits[a],hits);
-   if(u) units.push(u);
-  }
-  // 去掉重复项和被其他单元包含的（同一控件的内层）
-  var outer=[];
-  for(var c1=0;c1<units.length;c1++){
-   var skip=false;
-   for(var c0=0;c0<c1;c0++){ if(units[c0]===units[c1]){ skip=true; break; } }
-   if(!skip){
-    for(var c2=0;c2<units.length;c2++){
-     if(units[c2]!==units[c1]&&units[c2].contains(units[c1])){ skip=true; break; }
-    }
-   }
-   if(!skip) outer.push(units[c1]);
-  }
-  // 优先「整组下移」：所有命中控件的共同容器（右上角这一组通常有共同 wrapper），
-  // 一次位移把组内全部元素带走 —— 包括不属于命中的外框、分隔线、下拉箭头，
-  // 不会再有残留空方框。容器太宽（整行）或太高时退回下面的逐行下移。
-  var grp=commonAncestor(outer);
-  if(grp&&grp!==document.body&&grp!==document.documentElement){
-   var gr=grp.getBoundingClientRect();
-   if(gr.width>8&&gr.height>8&&gr.height<=220&&gr.width<=window.innerWidth*0.6){
-    var gt=Math.ceil(Math.ceil(br.bottom+8)-gr.top);
-    if(gt>0){
-     overlapMoved.push({el:grp,z:grp.style.zIndex||'',pos:grp.style.position||''});
-     lift(grp);
-     grp.style.transform='translateY('+gt+'px)';
-     return;
-    }
-   }
-  }
-  // 按原始 top 分行（容忍 8px 误差），行内 x 不动，行间自上而下依次堆叠下移
-  var rows=[];
-  for(var m2=0;m2<outer.length;m2++){
-   var rr=outer[m2].getBoundingClientRect();
-   var row=null;
-   for(var q=0;q<rows.length;q++){
-    if(Math.abs(rows[q].top-rr.top)<=8){ row=rows[q]; break; }
-   }
-   if(!row){ row={top:rr.top,h:rr.height,items:[]}; rows.push(row); }
-   if(rr.height>row.h) row.h=rr.height;
-   row.items.push({el:outer[m2],top:rr.top});
-  }
-  rows.sort(function(p1,p2){ return p1.top-p2.top; });
-  var y=Math.ceil(br.bottom+8);
-  for(var ri=0;ri<rows.length;ri++){
-   for(var ii=0;ii<rows[ri].items.length;ii++){
-    var it=rows[ri].items[ii];
-    var t=Math.ceil(y-it.top);
-    if(t<=0) continue;
-    var e=it.el;
-    var cs=getComputedStyle(e);
-    overlapMoved.push({el:e,z:e.style.zIndex||'',pos:e.style.position||''});
-    lift(e);
-    e.style.transform='translateY('+t+'px)';
-   }
-   y+=rows[ri].h+6;
-  }
- }
- function place(){
-  var box=document.getElementById(BOX);
-  if(!box) return;
-  box.style.left='auto';
-  box.style.right='0px';
-  clearOverlap();
- }
- window.__dshCaptionPlace=place;
- function build(){
-  var box=document.getElementById(BOX);
-  if(box) return;
-  var st=document.createElement('style');
-  st.id='dsh-desktop-caption-css';
-  st.textContent='#'+BOX+'{position:fixed;top:0;right:0;z-index:2147483000;display:flex;height:40px;user-select:none;-webkit-user-select:none;}'
-   +'.dsh-cap-btn{width:46px;height:40px;display:flex;align-items:center;justify-content:center;color:inherit;opacity:.72;cursor:default;'
-   +'transition:opacity .16s ease,background-color .16s ease;}'
-   +'.dsh-cap-btn svg{border-radius:3px;}'
-   +'.dsh-cap-btn:hover{background:rgba(128,128,128,.14);opacity:1;}'
-   +'.dsh-cap-btn:active{background:rgba(128,128,128,.22);}'
-   +'.dsh-cap-btn[data-kind=close]:hover{background:rgba(232,17,35,.88);color:#fff;opacity:1;}'
-   +'.dsh-cap-btn[data-kind=close]:active{background:rgba(200,15,30,.92);color:#fff;}';
-  (document.head||document.documentElement).appendChild(st);
-  box=document.createElement('div');
-  box.id=BOX;
-  var kinds=['min','max','close'];
-  for(var i=0;i<kinds.length;i++){
-   (function(kind){
-    var b=document.createElement('div');
-    b.className='dsh-cap-btn';
-    b.setAttribute('data-kind',kind);
-    b.appendChild(icon(kind));
-    b.addEventListener('click',function(){ post('dsh-'+kind); });
-    box.appendChild(b);
-   })(kinds[i]);
-  }
-  document.body.appendChild(box);
- }
- // 最大化状态变化时由桌面壳回调，切换最大化 / 还原图标
- window.__dshCaptionMax=function(m){
-  window.__dshMax=!!m;
-  var box=document.getElementById(BOX);
-  if(!box||!box.children[1]) return;
-  var s=box.children[1].firstChild;
-  if(s) drawMax(s,!!m);
- };
- // 边缘拖拽缩放：热区由网页判定，桌面壳自己按鼠标位移换算窗口边界。
- // 光标必须用 !important 规则压住 —— 页面根容器自带的 cursor 会让挂在 <html> 上的
- // 光标失效；另外左下/右下角用规范的 nesw-resize / nwse-resize，避免斜向箭头反向。
+ // 窗口缩放热区由网页判定（WebView2 的子窗口 airspace 规则会让 WinForms 贴边抓手
+ // 收不到鼠标），按下后把方向上报给桌面壳，桌面壳按鼠标位移自己换算窗口边界。
+ // 注意：这里**不含上边** —— 窗口上端那 40px 是桌面壳自绘的标题带（真正的 WinForms
+ // 区域），顶边与左上/右上角由标题带自己处理，页面顶端不是窗口顶端。
+ if (window.__dshResizeReady) return;
+ if (window.top !== window) return; // 只在顶层文档注入，iframe 里不注册
+ window.__dshResizeReady = true;
  var EDGE=6;
- var EDGE_CURSOR={left:'w-resize',right:'e-resize',top:'n-resize',bottom:'s-resize',
-  topleft:'nwse-resize',topright:'nesw-resize',bottomleft:'nesw-resize',bottomright:'nwse-resize'};
+ var CUR={left:'w-resize',right:'e-resize',bottom:'s-resize',
+  bottomleft:'nesw-resize',bottomright:'nwse-resize'};
+ function post(m){ try{ window.chrome.webview.postMessage(m); }catch(e){} }
+ // 光标必须用 !important 规则压住 —— 页面根容器自带的 cursor 会让挂在 <html> 上的
+ // 光标失效；左下/右下角用规范的 nesw-resize / nwse-resize，避免斜向箭头反向。
  var edgeSt=document.createElement('style');
  edgeSt.id='dsh-edge-cursor-css';
  edgeSt.textContent='html.dsh-edge,html.dsh-edge *{cursor:var(--dsh-edge-cursor,default)!important}';
@@ -721,12 +482,10 @@ namespace DeepSeekHarness
  function edgeAt(x,y){
   var w=document.documentElement.clientWidth||window.innerWidth;
   var h=document.documentElement.clientHeight||window.innerHeight;
-  var l=x<=EDGE,r=x>=w-EDGE,t=y<=EDGE,b=y>=h-EDGE;
-  if(t&&l) return 'topleft';
-  if(t&&r) return 'topright';
+  var l=x<=EDGE,r=x>=w-EDGE,b=y>=h-EDGE;
+  if(l&&r) return ''; // 窗口窄到两条边重在一起时不做缩放，避免误判
   if(b&&l) return 'bottomleft';
   if(b&&r) return 'bottomright';
-  if(t) return 'top';
   if(b) return 'bottom';
   if(l) return 'left';
   if(r) return 'right';
@@ -737,17 +496,16 @@ namespace DeepSeekHarness
   ensureEdgeCss();
   if(window.__dshMax||window.__dshResizing){ setEdgeCursor(''); return; }
   var d=edgeAt(e.clientX,e.clientY);
-  setEdgeCursor(d?EDGE_CURSOR[d]:'');
+  setEdgeCursor(d?CUR[d]:'');
  },true);
  document.addEventListener('mouseleave',function(){ setEdgeCursor(''); },true);
  document.addEventListener('mouseup',function(e){
   window.__dshResizing=false;
   if(window.__dshMax){ setEdgeCursor(''); return; }
   var d=edgeAt(e.clientX,e.clientY);
-  setEdgeCursor(d?EDGE_CURSOR[d]:'');
+  setEdgeCursor(d?CUR[d]:'');
  },true);
- // 必须先于下面的拖动监听注册，并用 stopImmediatePropagation 拦住拖动逻辑。
- // 边缘优先于窗口按钮：最外侧那几像素交给缩放，符合系统窗口的习惯。
+ // 只处理左 / 右 / 下边与两个下角：上端属于标题带。
  document.addEventListener('mousedown',function(e){
   if(e.button!==0||window.__dshMax) return;
   var d=edgeAt(e.clientX,e.clientY);
@@ -755,23 +513,11 @@ namespace DeepSeekHarness
   e.preventDefault();
   e.stopImmediatePropagation();
   window.__dshResizing=true;
-  setEdgeCursor(EDGE_CURSOR[d]);
+  setEdgeCursor(CUR[d]);
   post('dsh-resize:'+d);
  },true);
- // 顶部 44px 内的空白处：按下拖动窗口（阻止网页选中文本），双击切换最大化。
- // 交互元素（按钮 / 链接 / 输入框…）不拦截，点击行为完全不受影响。
- document.addEventListener('mousedown',function(e){
-  if(e.button!==0||e.clientY>DRAG_H) return;
-  if(interactive(e.target)) return;
-  e.preventDefault();
-  post('dsh-drag');
- },true);
- document.addEventListener('dblclick',function(e){
-  if(e.clientY>DRAG_H||interactive(e.target)) return;
-  post('dsh-dblmax');
- },true);
- function boot(){ build(); place(); post('dsh-chrome-ready'); }
- if(document.body) boot(); else document.addEventListener('DOMContentLoaded', boot);
+ // 就绪上报：桌面壳据此同步一次「是否最大化」（最大化时网页侧边缘热区要停用）
+ post('dsh-chrome-ready');
 })();
 ";
 
@@ -890,15 +636,17 @@ namespace DeepSeekHarness
         //      左下/右下角的双向箭头写反（16/17 号命中码），于是两个下角光标转了 90°。
         // 现在统一改为「网页判定边缘 + 桌面壳自己按鼠标位移换算窗口边界」，
         // 不用加 WS_THICKFRAME（加了系统会重新画出边框），也不会再有任何贴边控件。
-        // 自绘标题栏：白底 + 底部 1px 分隔线；左侧图标与标题，右侧本地端口 + 三个标准标题按钮
+        // 自绘标题带：和网页头部同色、不画分隔线 —— 视觉上就是「网页头部上端多出一行」，
+        // 一眼看去仍是一整块头部（v0.8.5 起追求的"内外不要两道框"）。
+        // 左侧图标与标题，右侧本地端口 + 三个标准窗口按钮。
+        //
+        // 为什么窗口按钮回到桌面壳自己这 40px 里（v0.8.5-0.9.0 曾把它们注入网页头部）：
+        // 注入方案必须把网页自己的顶部控件挪开才不会重叠，而挪动方式无论水平还是垂直
+        // 都会破坏 dsh 的头部布局（残留空外框、热区错位、小窗错行、菜单文字位移……）。
+        // 现在窗口按钮在自己的区域里，网页布局一个像素都不动，这类问题从根上消失。
         private void BuildTitleBar()
         {
             titleBar = new Panel { Dock = DockStyle.Top, Height = UI.TitleBarHeight, BackColor = UI.Bar };
-            titleBar.Paint += delegate (object s, PaintEventArgs e)
-            {
-                using (Pen p = new Pen(UI.Separator))
-                    e.Graphics.DrawLine(p, 0, titleBar.Height - 1, titleBar.Width, titleBar.Height - 1);
-            };
 
             // 无边框窗口没有系统标题栏，鼠标按下时投递 HTCAPTION 交给系统处理拖动；
             // 双击标题栏最大化。拖动/双击必须同时挂到标题与图标上，
@@ -906,7 +654,20 @@ namespace DeepSeekHarness
             MouseEventHandler drag = delegate (object s, MouseEventArgs e) { BeginDrag(e); };
             // MouseDoubleClick 的委托类型是 MouseEventHandler（带 MouseEventArgs），不是 EventHandler
             MouseEventHandler dbl = delegate (object s, MouseEventArgs e) { ToggleMaximize(); };
-            titleBar.MouseDown += drag;
+
+            // 标题带自己就是窗口的顶边与左上/右上角：未最大化时这几像素是缩放热区。
+            // WebView2 只覆盖页面区域，标题带是真正的 WinForms 区域，鼠标消息能正常到达。
+            titleBar.MouseMove += delegate (object s, MouseEventArgs e)
+            {
+                Cursor c = EdgeCursorFor(BandEdgeAt(e.Location));
+                if (titleBar.Cursor != c) titleBar.Cursor = c;
+            };
+            titleBar.MouseDown += delegate (object s, MouseEventArgs e)
+            {
+                if (e.Button != MouseButtons.Left) return;
+                string dir = BandEdgeAt(e.Location);
+                if (dir.Length == 0) BeginDrag(e); else StartResizeFromWeb(dir);
+            };
             titleBar.MouseDoubleClick += dbl;
 
             // 左侧：程序图标
@@ -916,7 +677,8 @@ namespace DeepSeekHarness
                 Left = 12,
                 Top = (UI.TitleBarHeight - 16) / 2,
                 SizeMode = PictureBoxSizeMode.StretchImage,
-                BackColor = UI.Bar
+                BackColor = UI.Bar,
+                Cursor = Cursors.Default // 子控件显式用默认光标，别继承标题带上边缘的缩放光标
             };
             try
             {
@@ -944,7 +706,8 @@ namespace DeepSeekHarness
                 TextAlign = ContentAlignment.MiddleLeft,
                 ForeColor = UI.Label,
                 Font = UI.MakeFont(9.5f),
-                BackColor = UI.Bar
+                BackColor = UI.Bar,
+                Cursor = Cursors.Default
             };
             titleLabel.MouseDown += drag;
             titleLabel.MouseDoubleClick += dbl;
@@ -986,21 +749,54 @@ namespace DeepSeekHarness
             if (titleBar == null || titleBar.IsDisposed) return;
             int h = titleBar.Height;
             int bw = UI.CaptionButtonWidth;
+            // 上下各留 4px、右侧留 EdgeGrip：标题带的边缘要能当缩放热区用
+            // （窗口按钮如果贴着角，那几像素就会被按钮吃走，拖不到窗口边界）
+            int bh = h - 8, bt = 4, right = EdgeGrip;
             if (btnClose != null && !btnClose.IsDisposed)
-                btnClose.Bounds = new Rectangle(titleBar.Width - bw, 0, bw, h);
+                btnClose.Bounds = new Rectangle(titleBar.Width - right - bw, bt, bw, bh);
             if (btnMax != null && !btnMax.IsDisposed)
             {
-                btnMax.Bounds = new Rectangle(titleBar.Width - bw * 2, 0, bw, h);
+                btnMax.Bounds = new Rectangle(titleBar.Width - right - bw * 2, bt, bw, bh);
                 btnMax.Invalidate(); // 最大化/还原时图标要切换
             }
             if (btnMin != null && !btnMin.IsDisposed)
-                btnMin.Bounds = new Rectangle(titleBar.Width - bw * 3, 0, bw, h);
+                btnMin.Bounds = new Rectangle(titleBar.Width - right - bw * 3, bt, bw, bh);
 
             if (portBadge != null && !portBadge.IsDisposed)
             {
                 portBadge.Top = (h - portBadge.Height) / 2;
-                portBadge.Left = Math.Max(48, titleBar.Width - bw * 3 - portBadge.Width - 16);
+                portBadge.Left = Math.Max(48, titleBar.Width - right - bw * 3 - portBadge.Width - 16);
             }
+        }
+
+        // 窗口四周的缩放热区宽度（网页侧与标题带共用同一数值）
+        private const int EdgeGrip = 6;
+
+        // 左上/右上角：标题带内的边缘热区判定（最大化时窗口贴屏幕边，不参与缩放）
+        private string BandEdgeAt(Point p)
+        {
+            if (WindowState == FormWindowState.Maximized) return "";
+            int w = ClientSize.Width;
+            bool l = p.X <= EdgeGrip, r = p.X >= w - EdgeGrip - 1, t = p.Y <= EdgeGrip;
+            if (t && l) return "topleft";
+            if (t && r) return "topright";
+            if (t) return "top";
+            if (l) return "left";
+            if (r) return "right";
+            return "";
+        }
+
+        // 缩放方向 → 系统光标
+        private static Cursor EdgeCursorFor(string dir)
+        {
+            switch (dir)
+            {
+                case "top": return Cursors.SizeNS;
+                case "left": case "right": return Cursors.SizeWE;
+                case "topleft": case "bottomright": return Cursors.SizeNWSE;
+                case "topright": case "bottomleft": return Cursors.SizeNESW;
+            }
+            return Cursors.Default;
         }
 
         // 无边框窗口没有系统标题栏，鼠标按下时投递 HTCAPTION 交给系统处理拖动
@@ -1019,29 +815,6 @@ namespace DeepSeekHarness
             if (portBadge == null || portBadge.IsDisposed) return;
             portBadge.Text = "127.0.0.1:" + port;
             LayoutChrome();
-        }
-
-        // 一体化标题栏注入成功后隐藏兜底标题栏：窗口按钮由网页右上角渲染，
-        // 与网页头部合成一道框，不再有桌面壳额外的内外两层。
-        // 若注入脚本被拦截或页面异常，兜底标题栏保持可见，窗口始终可控。
-        private void HideFallbackTitleBar()
-        {
-            try
-            {
-                if (titleBar != null && !titleBar.IsDisposed && titleBar.Visible)
-                    titleBar.Visible = false; // Dock 布局会自动把 WebView 扩展到整个窗口
-            }
-            catch { }
-        }
-
-        // 网页顶部空白区按下后的窗口拖动（等价于标题栏拖动）
-        private void BeginDragFromWeb()
-        {
-            if (WindowState != FormWindowState.Maximized)
-            {
-                ReleaseCapture();
-                SendMessage(Handle, WM_NCLBUTTONDOWN, (IntPtr)HTCAPTION, IntPtr.Zero);
-            }
         }
 
         // 网页判定鼠标在窗口边缘按下 → 开始手动缩放。
@@ -1127,7 +900,7 @@ namespace DeepSeekHarness
             catch { }
         }
 
-        // 最大化状态变化时通知网页切换窗口按钮的 最大化/还原图标
+        // 最大化状态变化时告诉网页：最大化时窗口贴着屏幕边，网页侧的边缘热区要停用
         private void SyncCaptionMaxState()
         {
             if (webView == null || webView.CoreWebView2 == null || IsDisposed) return;
@@ -1138,8 +911,7 @@ namespace DeepSeekHarness
             string maxed = st == 1 ? "true" : "false";
             try
             {
-                webView.CoreWebView2.ExecuteScriptAsync(
-                    "if(window.__dshCaptionMax)window.__dshCaptionMax(" + maxed + ");");
+                webView.CoreWebView2.ExecuteScriptAsync("window.__dshMax=" + maxed + ";");
             }
             catch { }
         }
@@ -1471,11 +1243,9 @@ namespace DeepSeekHarness
 
         // 网页发来的消息：
         //   'dsh-update-open'  —— 网页更新按钮被点击，进入升级流程
-        //   'dsh-theme:...'    —— 网页主题背景色上报，描边等兜底界面跟着切换
-        //   'dsh-chrome-ready' —— 一体化标题栏注入完成，隐藏兜底标题栏
-        //   'dsh-drag'         —— 网页顶部空白区按下，开始拖动窗口
-        //   'dsh-dblmax'       —— 网页顶部空白区双击，切换最大化
-        //   'dsh-min'/'dsh-max'/'dsh-close' —— 网页右上角窗口按钮
+        //   'dsh-theme:...'    —— 网页主题背景色上报，标题带等兜底界面跟着切换
+        //   'dsh-chrome-ready' —— 网页侧边缘缩放热区就绪，同步一次最大化状态
+        //   'dsh-resize:方向'  —— 网页侧判定鼠标在窗口边缘按下，开始缩放
         private void OnWebMessageReceived(object sender, CoreWebView2WebMessageReceivedEventArgs e)
         {
             string msg = null;
@@ -1496,40 +1266,19 @@ namespace DeepSeekHarness
             }
             if (msg == "dsh-chrome-ready")
             {
-                // 注入完成即同步一次最大化状态：否则刚加载完网页按钮默认画成
-                // 还原图标，窗口实际最大化时右数第二个按钮就不是方形最大化样式
+                // 网页侧热区就绪即同步一次最大化状态：最大化时窗口贴屏幕边，
+                // 网页侧的边缘热区必须停用，否则贴着屏幕边拖会误触发缩放
                 if (!IsDisposed) BeginInvoke(new Action(() =>
                 {
                     maxStateSynced = -1; // 新文档，强制同步一次
-                    HideFallbackTitleBar();
                     SyncCaptionMaxState();
                 }));
-                return;
-            }
-            if (msg == "dsh-drag")
-            {
-                if (!IsDisposed) BeginInvoke(new Action(BeginDragFromWeb));
                 return;
             }
             if (msg.IndexOf("dsh-resize:", StringComparison.Ordinal) == 0)
             {
                 string dir = msg.Substring(11);
                 if (!IsDisposed) BeginInvoke(new Action(delegate { StartResizeFromWeb(dir); }));
-                return;
-            }
-            if (msg == "dsh-dblmax" || msg == "dsh-max")
-            {
-                if (!IsDisposed) BeginInvoke(new Action(ToggleMaximize));
-                return;
-            }
-            if (msg == "dsh-min")
-            {
-                if (!IsDisposed) BeginInvoke(new Action(() => { WindowState = FormWindowState.Minimized; }));
-                return;
-            }
-            if (msg == "dsh-close")
-            {
-                if (!IsDisposed) BeginInvoke(new Action(Close));
                 return;
             }
         }
