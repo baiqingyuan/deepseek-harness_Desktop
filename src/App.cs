@@ -523,9 +523,13 @@ namespace DeepSeekHarness
   var st=document.createElement('style');
   st.id='dsh-desktop-caption-css';
   st.textContent='#'+BOX+'{position:fixed;top:0;right:0;z-index:2147483000;display:flex;height:40px;user-select:none;-webkit-user-select:none;}'
-   +'.dsh-cap-btn{width:46px;height:40px;display:flex;align-items:center;justify-content:center;color:inherit;opacity:.8;cursor:default;}'
-   +'.dsh-cap-btn:hover{background:rgba(128,128,128,.18);opacity:1;}'
-   +'.dsh-cap-btn[data-kind=close]:hover{background:#E81123;color:#fff;}';
+   +'.dsh-cap-btn{width:46px;height:40px;display:flex;align-items:center;justify-content:center;color:inherit;opacity:.72;cursor:default;'
+   +'transition:opacity .16s ease,background-color .16s ease;}'
+   +'.dsh-cap-btn svg{border-radius:3px;}'
+   +'.dsh-cap-btn:hover{background:rgba(128,128,128,.14);opacity:1;}'
+   +'.dsh-cap-btn:active{background:rgba(128,128,128,.22);}'
+   +'.dsh-cap-btn[data-kind=close]:hover{background:rgba(232,17,35,.88);color:#fff;opacity:1;}'
+   +'.dsh-cap-btn[data-kind=close]:active{background:rgba(200,15,30,.92);color:#fff;}';
   (document.head||document.documentElement).appendChild(st);
   box=document.createElement('div');
   box.id=BOX;
@@ -893,11 +897,20 @@ namespace DeepSeekHarness
         {
             loadingCard = new BufferedPanel { Dock = DockStyle.Fill, BackColor = UI.WindowBg };
 
-            Panel card = new BufferedPanel { Size = new Size(420, 156), BackColor = UI.Card };
+            Panel card = new BufferedPanel { Size = new Size(420, 156), BackColor = UI.WindowBg };
             card.Paint += delegate (object s, PaintEventArgs e)
             {
-                using (Pen p = new Pen(UI.Border))
-                    e.Graphics.DrawRectangle(p, 0, 0, card.Width - 1, card.Height - 1);
+                // 柔和圆角卡片：先铺窗口底色，再画圆角矩形盖上去
+                e.Graphics.SmoothingMode = System.Drawing.Drawing2D.SmoothingMode.AntiAlias;
+                using (SolidBrush bg = new SolidBrush(UI.WindowBg))
+                    e.Graphics.FillRectangle(bg, 0, 0, card.Width, card.Height);
+                using (System.Drawing.Drawing2D.GraphicsPath path = RoundedPath(new Rectangle(0, 0, card.Width - 1, card.Height - 1), 16))
+                {
+                    using (SolidBrush fill = new SolidBrush(UI.Card))
+                        e.Graphics.FillPath(fill, path);
+                    using (Pen p = new Pen(UI.Border))
+                        e.Graphics.DrawPath(p, path);
+                }
             };
 
             Label title = new Label
@@ -950,6 +963,19 @@ namespace DeepSeekHarness
         {
             card.Left = Math.Max(0, (loadingCard.Width - card.Width) / 2);
             card.Top = Math.Max(0, (loadingCard.Height - card.Height) / 2);
+        }
+
+        // 圆角矩形路径（柔和卡片用）
+        private static System.Drawing.Drawing2D.GraphicsPath RoundedPath(Rectangle r, int radius)
+        {
+            System.Drawing.Drawing2D.GraphicsPath p = new System.Drawing.Drawing2D.GraphicsPath();
+            int d = radius * 2;
+            p.AddArc(r.Left, r.Top, d, d, 180, 90);
+            p.AddArc(r.Right - d, r.Top, d, d, 270, 90);
+            p.AddArc(r.Right - d, r.Bottom - d, d, d, 0, 90);
+            p.AddArc(r.Left, r.Bottom - d, d, d, 90, 90);
+            p.CloseFigure();
+            return p;
         }
 
         private void SetLoadingText(string text)
