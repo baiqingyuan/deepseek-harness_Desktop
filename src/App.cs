@@ -913,13 +913,18 @@ namespace DeepSeekHarness
 
                 await view.EnsureCoreWebView2Async(env);
 
-                // 网页里的「左下角更新按钮」：每个文档创建时都注入，刷新/跳转后依然在
+                // 网页里的「左下角更新按钮」：每个文档创建时都注入，刷新/跳转后依然在。
+                // 注意 API 名带 Async 后缀（WebView2 SDK 1.0.4129.50），写成不带 Async 的旧名会编译不过。
+                // 注入失败不能影响主流程（界面照常可用，只是没有这个按钮），所以只记日志。
                 try
                 {
-                    view.CoreWebView2.AddScriptToExecuteOnDocumentCreated(UpdateBridgeScript);
+                    await view.CoreWebView2.AddScriptToExecuteOnDocumentCreatedAsync(UpdateBridgeScript);
                     view.CoreWebView2.WebMessageReceived += OnWebMessageReceived;
                 }
-                catch { }
+                catch (Exception ex)
+                {
+                    Log.Error("注入更新按钮脚本", ex);
+                }
 
                 view.CoreWebView2.Settings.AreDevToolsEnabled = false;
                 view.CoreWebView2.Settings.AreDefaultContextMenusEnabled = false;
