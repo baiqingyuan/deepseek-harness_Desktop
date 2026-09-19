@@ -486,7 +486,6 @@ namespace DeepSeekHarness
  // 注入右内边距，把网页自己的右上角控件往左推，永远腾出三个按钮的宽度。
  // 只查这一小组选择器（不是全树遍历），配合节流不会重蹈 v0.8.2 的重排风暴。
  var CAP_W=140; // 3 个按钮 × 46px，留 2px 余量
- var reservedEl=null;
  function reserve(){
   var box=document.getElementById(BOX);
   var cands=document.querySelectorAll(
@@ -499,18 +498,13 @@ namespace DeepSeekHarness
    if(r.width<10||r.width>180||r.height<12||r.height>72) continue;
    if(r.top>56||r.bottom<0) continue;
    if(r.right<w-280) continue; // 只看最右 280px 内的顶部控件
-   // 沿祖先链找一个横贯整行、贴顶的容器（dsh 的 header），给它注入右内边距
-   var p=el.parentElement, guard=0;
-   while(p&&guard++<10){
-    var pr=p.getBoundingClientRect();
-    if(pr.width>=w*0.6&&pr.top<=8){ break; }
-    p=p.parentElement;
-   }
+   // 直接给控件的父容器注入右内边距：flex 行内子项必然被推向左边，
+   // 不依赖高层祖先是否传递 padding（v0.8.7 就是因此漏推、仍然重叠）
+   var p=el.parentElement;
    if(p&&!p.__dshPad){
     p.__dshPad=true;
     p.style.paddingRight=CAP_W+'px';
     p.style.boxSizing='border-box';
-    if(!reservedEl) reservedEl=p;
    }
    break;
   }
@@ -1223,7 +1217,9 @@ namespace DeepSeekHarness
             }
             if (msg == "dsh-chrome-ready")
             {
-                if (!IsDisposed) BeginInvoke(new Action(HideFallbackTitleBar));
+                // 注入完成即同步一次最大化状态：否则刚加载完网页按钮默认画成
+                // 还原图标，窗口实际最大化时右数第二个按钮就不是方形最大化样式
+                if (!IsDisposed) BeginInvoke(new Action(() => { HideFallbackTitleBar(); SyncCaptionMaxState(); }));
                 return;
             }
             if (msg == "dsh-drag")
@@ -1505,10 +1501,9 @@ namespace DeepSeekHarness
                 if (DateTime.UtcNow - start > TimeSpan.FromSeconds(90))
                     throw new Exception("等待 dsh 服务就绪超时（90 秒）。" + ErrorTailText());
 
-                int waited = (int)((DateTime.UtcNow - start).TotalSeconds);
-                int shown = waited; // 闭包里只能用常量，复制一份
+                // 不再显示已等待秒数（用户反馈：首次启动不要跳秒），固定一句提示
                 BeginInvoke(new Action(() =>
-                    SetLoadingText("正在启动本地服务…（已等待 " + shown + " 秒）")));
+                    SetLoadingText("正在启动本地服务，请稍候…")));
                 await Task.Delay(500);
             }
         }
