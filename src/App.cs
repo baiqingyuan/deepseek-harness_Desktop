@@ -267,7 +267,8 @@ namespace DeepSeekHarness
             "https://github.com/baiqingyuan/deepseek-harness_Desktop/releases";
 
         // 注入到 dsh 网页里的「桌面更新」脚本：
-        // 1) 挂一个左下角更新按钮（优先塞进设置按钮所在行，即设置按钮右侧；找不到就浮在左下角）；
+        // 1) 挂一个更新按钮，视觉上位于**侧边栏内部**（设置按钮上方一行），
+        //    侧边栏收起 / 隐藏时按钮同步消失；
         // 2) 同时暴露官方 dsh 0.1.6+ 约定的 window.dshDesktop 更新桥接，
         //    将来升级 dsh 后由官方界面自己渲染按钮，本脚本会自动隐藏、不重复。
         // 全部使用单引号，便于直接放进 C# 的逐字字符串。
@@ -358,29 +359,30 @@ namespace DeepSeekHarness
   }
   return false;
  }
- // 按钮常驻 document.body（React 不管理这里），位置动态对齐到设置按钮右侧。
+ // 按钮常驻 document.body（React 不管理这里），视觉上定位到**侧边栏内部**：
+ // 侧边栏内、设置按钮上方一行。侧边栏收起（找不到符合条件的侧边栏）时按钮隐藏，
+// 与侧边栏同步出现 / 消失。
  // 之前把按钮塞进 React 管理的行容器：React 重渲染会删掉它 → 我们再插回去 →
 // 互相打架，配合 MutationObserver 形成插入/删除风暴，页面会一直卡在 Loading 界面。
  function place(){
   var b=document.getElementById(BTN);
   if(!b) return;
+  var sb=sidebar();
+  if(!sb){ b.style.display='none'; return; }
   b.style.position='fixed';
+  var sr=sb.getBoundingClientRect();
+  b.style.bottom='auto';
+  b.style.left=Math.round(sr.left+12)+'px';
   var s=settingsBtn();
   if(s){
    var r=s.getBoundingClientRect();
-   if(r.width>0){
-    b.style.left=Math.round(r.right+8)+'px';
-    b.style.top=Math.round(r.top+(r.height-b.offsetHeight)/2)+'px';
-    b.style.bottom='auto';
+   // 设置按钮在侧边栏内：放到它上方一行，视觉上属于侧边栏
+   if(r.top>sr.top && r.left<sr.right){
+    b.style.top=Math.round(r.top-b.offsetHeight-8)+'px';
     return;
    }
   }
-  var sb=sidebar();
-  var left=12;
-  if(sb){ var sr=sb.getBoundingClientRect(); if(sr.left<60&&sr.width>40) left=Math.round(sr.left+10); }
-  b.style.left=left+'px';
-  b.style.bottom='12px';
-  b.style.top='auto';
+  b.style.top=Math.round(sr.bottom-b.offsetHeight-14)+'px';
  }
  // 把页面背景色上报给桌面壳：标题栏/描边/文字跟着主题切换（深色界面配深色外框）
  function theme(){
@@ -396,7 +398,9 @@ namespace DeepSeekHarness
   lastRun=Date.now(); pending=false;
   var b=document.getElementById(BTN);
   if(!b){ style(); b=build(); }
-  b.style.display = hasNative() ? 'none' : 'inline-flex';
+  // 侧边栏不在（收起/隐藏）或官方原生更新入口存在：按钮一律隐藏
+  if(!sidebar() || hasNative()){ b.style.display='none'; render(); theme(); return; }
+  b.style.display='inline-flex';
   place(); render(); theme();
  }
  // MutationObserver 回调只登记，真实工作经节流合并 —— 启动期 React 高频改 DOM，
@@ -419,6 +423,99 @@ namespace DeepSeekHarness
    subscribe:function(l){ listeners.push(l); return function(){ var i=listeners.indexOf(l); if(i>=0) listeners.splice(i,1); }; }
   }};
  }
+ if(document.body) boot(); else document.addEventListener('DOMContentLoaded', boot);
+})();
+
+(function(){
+ // 一体化标题栏：桌面壳的窗口控制融进网页头部，不再有独立的内外两道框。
+ // 1) 右上角固定三个窗口按钮（最小化 / 最大化 / 关闭），颜色继承网页主题（深浅色自适应）；
+ // 2) 顶部空白区按下拖动窗口、双击最大化 —— 用文档级捕获监听转发给桌面壳，
+ //    不叠加任何遮挡层，网页头部自己的按钮（侧边栏开关、标签页等）照常可点；
+ // 3) 注入完成上报 dsh-chrome-ready，桌面壳收到后隐藏自己的兜底标题栏。
+ if (window.__dshChromeReady) return;
+ if (window.top !== window) return; // 只在顶层文档注入，iframe 里不生成窗口按钮
+ window.__dshChromeReady = true;
+ var BOX='dsh-desktop-caption';
+ var DRAG_H=44;
+ function post(m){ try{ window.chrome.webview.postMessage(m); }catch(e){} }
+ function svg(tag,attrs){
+  var e=document.createElementNS('http://www.w3.org/2000/svg',tag);
+  for(var k in attrs){ if(attrs.hasOwnProperty(k)) e.setAttribute(k,attrs[k]); }
+  return e;
+ }
+ function drawMax(s,maxed){
+  while(s.firstChild) s.removeChild(s.firstChild);
+  if(maxed){
+   // 还原图标：两个错开的小方框
+   s.appendChild(svg('rect',{x:2.5,y:0.5,width:7,height:7,stroke:'currentColor','stroke-width':1,fill:'none'}));
+   s.appendChild(svg('rect',{x:0.5,y:2.5,width:7,height:7,stroke:'currentColor','stroke-width':1,fill:'none'}));
+  }else{
+   s.appendChild(svg('rect',{x:0.5,y:0.5,width:9,height:9,stroke:'currentColor','stroke-width':1,fill:'none'}));
+  }
+ }
+ function icon(kind){
+  var s=svg('svg',{width:10,height:10,viewBox:'0 0 10 10'});
+  if(kind==='min'){
+   s.appendChild(svg('path',{d:'M0 7.5 H10',stroke:'currentColor','stroke-width':1,fill:'none'}));
+  }else if(kind==='max'){
+   drawMax(s,false);
+  }else{
+   s.appendChild(svg('path',{d:'M0 0 L10 10 M10 0 L0 10',stroke:'currentColor','stroke-width':1,fill:'none'}));
+  }
+  return s;
+ }
+ function interactive(t){
+  if(t && t.closest){
+   if(t.closest('button,a,input,textarea,select,label,[role=button],[contenteditable],iframe,object,embed,video')) return true;
+   if(t.closest('#'+BOX)) return true;
+  }
+  return false;
+ }
+ function build(){
+  var box=document.getElementById(BOX);
+  if(box) return;
+  var st=document.createElement('style');
+  st.id='dsh-desktop-caption-css';
+  st.textContent='#'+BOX+'{position:fixed;top:0;right:0;z-index:2147483000;display:flex;height:40px;user-select:none;-webkit-user-select:none;}'
+   +'.dsh-cap-btn{width:46px;height:40px;display:flex;align-items:center;justify-content:center;color:inherit;opacity:.8;cursor:default;}'
+   +'.dsh-cap-btn:hover{background:rgba(128,128,128,.18);opacity:1;}'
+   +'.dsh-cap-btn[data-kind=close]:hover{background:#E81123;color:#fff;}';
+  (document.head||document.documentElement).appendChild(st);
+  box=document.createElement('div');
+  box.id=BOX;
+  var kinds=['min','max','close'];
+  for(var i=0;i<kinds.length;i++){
+   (function(kind){
+    var b=document.createElement('div');
+    b.className='dsh-cap-btn';
+    b.setAttribute('data-kind',kind);
+    b.appendChild(icon(kind));
+    b.addEventListener('click',function(){ post('dsh-'+kind); });
+    box.appendChild(b);
+   })(kinds[i]);
+  }
+  document.body.appendChild(box);
+ }
+ // 最大化状态变化时由桌面壳回调，切换最大化 / 还原图标
+ window.__dshCaptionMax=function(m){
+  var box=document.getElementById(BOX);
+  if(!box||!box.children[1]) return;
+  var s=box.children[1].firstChild;
+  if(s) drawMax(s,!!m);
+ };
+ // 顶部 44px 内的空白处：按下拖动窗口（阻止网页选中文本），双击切换最大化。
+ // 交互元素（按钮 / 链接 / 输入框…）不拦截，点击行为完全不受影响。
+ document.addEventListener('mousedown',function(e){
+  if(e.button!==0||e.clientY>DRAG_H) return;
+  if(interactive(e.target)) return;
+  e.preventDefault();
+  post('dsh-drag');
+ },true);
+ document.addEventListener('dblclick',function(e){
+  if(e.clientY>DRAG_H||interactive(e.target)) return;
+  post('dsh-dblmax');
+ },true);
+ function boot(){ build(); post('dsh-chrome-ready'); }
  if(document.body) boot(); else document.addEventListener('DOMContentLoaded', boot);
 })();
 ";
@@ -530,6 +627,7 @@ namespace DeepSeekHarness
             if (!Padding.Equals(want)) Padding = want;
             LayoutChrome();
             LayoutGrips();
+            SyncCaptionMaxState(); // 网页右上角窗口按钮的 最大化/还原图标 跟着切
         }
 
         // 无边框窗口没有系统边框，缩放热区需要自己做：
@@ -705,6 +803,42 @@ namespace DeepSeekHarness
             if (portBadge == null || portBadge.IsDisposed) return;
             portBadge.Text = "127.0.0.1:" + port;
             LayoutChrome();
+        }
+
+        // 一体化标题栏注入成功后隐藏兜底标题栏：窗口按钮由网页右上角渲染，
+        // 与网页头部合成一道框，不再有桌面壳额外的内外两层。
+        // 若注入脚本被拦截或页面异常，兜底标题栏保持可见，窗口始终可控。
+        private void HideFallbackTitleBar()
+        {
+            try
+            {
+                if (titleBar != null && !titleBar.IsDisposed && titleBar.Visible)
+                    titleBar.Visible = false; // Dock 布局会自动把 WebView 扩展到整个窗口
+            }
+            catch { }
+        }
+
+        // 网页顶部空白区按下后的窗口拖动（等价于标题栏拖动）
+        private void BeginDragFromWeb()
+        {
+            if (WindowState != FormWindowState.Maximized)
+            {
+                ReleaseCapture();
+                SendMessage(Handle, WM_NCLBUTTONDOWN, (IntPtr)HTCAPTION, IntPtr.Zero);
+            }
+        }
+
+        // 最大化状态变化时通知网页切换窗口按钮的 最大化/还原图标
+        private void SyncCaptionMaxState()
+        {
+            if (webView == null || webView.CoreWebView2 == null || IsDisposed) return;
+            string maxed = WindowState == FormWindowState.Maximized ? "true" : "false";
+            try
+            {
+                webView.CoreWebView2.ExecuteScriptAsync(
+                    "if(window.__dshCaptionMax)window.__dshCaptionMax(" + maxed + ");");
+            }
+            catch { }
         }
 
         // 启动占位：居中的扁平卡片 + 走马灯进度条，避免启动期白屏。
@@ -968,9 +1102,11 @@ namespace DeepSeekHarness
 
                 await view.EnsureCoreWebView2Async(env);
 
-                // 网页里的「左下角更新按钮」：每个文档创建时都注入，刷新/跳转后依然在。
+                // 网页里的「侧边栏更新按钮」与一体化标题栏：每个文档创建时都注入，
+                // 刷新/跳转后依然在。注入完成后网页会上报 dsh-chrome-ready，
+                // 桌面壳随即隐藏兜底标题栏（窗口按钮改由网页右上角渲染）。
                 // 注意 API 名带 Async 后缀（WebView2 SDK 1.0.4129.50），写成不带 Async 的旧名会编译不过。
-                // 注入失败不能影响主流程（界面照常可用，只是没有这个按钮），所以只记日志。
+                // 注入失败不能影响主流程（界面照常可用、兜底标题栏保持可见），所以只记日志。
                 try
                 {
                     await view.CoreWebView2.AddScriptToExecuteOnDocumentCreatedAsync(UpdateBridgeScript);
@@ -1008,9 +1144,13 @@ namespace DeepSeekHarness
             }
         }
 
-        // 网页发来的两类消息：
-        //   'dsh-update-open'         —— 网页更新按钮被点击，进入升级流程
-        //   'dsh-theme:rgb(r,g,b)'    —— 网页主题背景色上报，标题栏/描边跟着切换
+        // 网页发来的消息：
+        //   'dsh-update-open'  —— 网页更新按钮被点击，进入升级流程
+        //   'dsh-theme:...'    —— 网页主题背景色上报，描边等兜底界面跟着切换
+        //   'dsh-chrome-ready' —— 一体化标题栏注入完成，隐藏兜底标题栏
+        //   'dsh-drag'         —— 网页顶部空白区按下，开始拖动窗口
+        //   'dsh-dblmax'       —— 网页顶部空白区双击，切换最大化
+        //   'dsh-min'/'dsh-max'/'dsh-close' —— 网页右上角窗口按钮
         private void OnWebMessageReceived(object sender, CoreWebView2WebMessageReceivedEventArgs e)
         {
             string msg = null;
@@ -1027,6 +1167,32 @@ namespace DeepSeekHarness
                 Color bg = ParseCssColor(msg.Substring(10));
                 if (!bg.IsEmpty && !IsDisposed)
                     BeginInvoke(new Action(() => ApplyChromeTheme(bg)));
+                return;
+            }
+            if (msg == "dsh-chrome-ready")
+            {
+                if (!IsDisposed) BeginInvoke(new Action(HideFallbackTitleBar));
+                return;
+            }
+            if (msg == "dsh-drag")
+            {
+                if (!IsDisposed) BeginInvoke(new Action(BeginDragFromWeb));
+                return;
+            }
+            if (msg == "dsh-dblmax" || msg == "dsh-max")
+            {
+                if (!IsDisposed) BeginInvoke(new Action(ToggleMaximize));
+                return;
+            }
+            if (msg == "dsh-min")
+            {
+                if (!IsDisposed) BeginInvoke(new Action(() => { WindowState = FormWindowState.Minimized; }));
+                return;
+            }
+            if (msg == "dsh-close")
+            {
+                if (!IsDisposed) BeginInvoke(new Action(Close));
+                return;
             }
         }
 
