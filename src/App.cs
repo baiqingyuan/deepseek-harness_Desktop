@@ -513,7 +513,7 @@ namespace DeepSeekHarness
   if(br.width===0) return;
   var cands=document.querySelectorAll(
    'button,a,[role=button],[class*=button],[class*=Button],[class*=trigger],[class*=Trigger],[class*=icon],[class*=Icon]');
-  var hits=null,minTop=0;
+  var hits=null;
   for(var i=0;i<cands.length;i++){
    var el=cands[i];
    if(box.contains(el)) continue;
@@ -522,18 +522,28 @@ namespace DeepSeekHarness
    if(r.width<6||r.height<10) continue;
    if(r.top>56||r.bottom<0) continue; // 只处理贴顶一行的控件
    if(r.right>br.left+2&&r.left<br.right-2){ // 与窗口按钮区重叠
-    if(!hits){ hits=[]; minTop=r.top; }
-    else if(r.top<minTop) minTop=r.top;
+    if(!hits) hits=[];
     hits.push(el);
    }
   }
   if(!hits) return;
-  // 整组下移：组顶停在窗口按钮下方 8px，组内每位移量相同、x 不变
-  var delta=Math.ceil(br.bottom+8-minTop);
-  if(delta<=0) return;
-  for(var k=0;k<hits.length;k++){
-   hits[k].style.transform='translateY('+delta+'px)';
-   overlapMoved.push(hits[k]);
+  // 只保留最外层命中元素：外层按钮容器和它内部的图标常常同时命中，
+  // 两层都平移会让位移叠加（图标被推到分隔线以下），且行高对不齐。
+  var outer=[];
+  for(var a=0;a<hits.length;a++){
+   var contained=false;
+   for(var b=0;b<hits.length;b++){
+    if(a!==b&&hits[b]!==hits[a]&&hits[b].contains(hits[a])){ contained=true; break; }
+   }
+   if(!contained) outer.push(hits[a]);
+  }
+  // 整组下移：统一对齐到窗口按钮下方 8px 的同一条基线（x 不动）
+  var base=Math.ceil(br.bottom+8);
+  for(var k=0;k<outer.length;k++){
+   var t=Math.ceil(base-outer[k].getBoundingClientRect().top);
+   if(t<=0) continue;
+   outer[k].style.transform='translateY('+t+'px)';
+   overlapMoved.push(outer[k]);
   }
  }
  function place(){
