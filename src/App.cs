@@ -143,20 +143,36 @@ namespace DeepSeekHarness
     // 改为 Windows 11 观感：白底标题栏 + 1px 分隔线 + 右侧标准三个标题按钮。
     internal static class UI
     {
-        public static readonly Color WindowBg = Color.FromArgb(245, 246, 248);       // 窗口底色
-        public static readonly Color Bar = Color.White;                              // 标题栏
-        public static readonly Color Border = Color.FromArgb(214, 217, 223);         // 窗口 1px 描边
-        public static readonly Color Separator = Color.FromArgb(232, 234, 238);      // 标题栏底部分隔线
-        public static readonly Color Hover = Color.FromArgb(240, 241, 245);          // 标题按钮悬停
-        public static readonly Color Pressed = Color.FromArgb(226, 228, 234);        // 标题按钮按下
-        public static readonly Color CloseHover = Color.FromArgb(232, 17, 35);       // 关闭按钮悬停
-        public static readonly Color Label = Color.FromArgb(31, 35, 40);             // 主文字
-        public static readonly Color LabelSecondary = Color.FromArgb(108, 114, 124); // 次级文字
-        public static readonly Color Card = Color.White;
-        public static readonly Color Accent = Color.FromArgb(77, 107, 254);          // DeepSeek 蓝
-        public const string FontName = "Segoe UI";                                   // Win11 为 Segoe UI Variable
-        public const int TitleBarHeight = 40;                                        // 标题栏高度
-        public const int CaptionButtonWidth = 46;                                    // 单个标题按钮宽度
+        // 注意：这些配色是**可变**的 —— 网页会把当前主题背景色上报给桌面壳，
+        // 标题栏 / 描边 / 文字会跟着切换（深色界面配深色标题栏），见 ApplyChromeTheme。
+        public static Color WindowBg = Color.FromArgb(245, 246, 248);       // 窗口底色
+        public static Color Bar = Color.White;                              // 标题栏
+        public static Color Border = Color.FromArgb(222, 224, 229);         // 窗口 1px 描边（柔和）
+        public static Color Separator = Color.FromArgb(234, 236, 240);      // 标题栏底部分隔线
+        public static Color Hover = Color.FromArgb(240, 241, 245);          // 标题按钮悬停
+        public static Color Pressed = Color.FromArgb(226, 228, 234);        // 标题按钮按下
+        public static Color CloseHover = Color.FromArgb(232, 17, 35);       // 关闭按钮悬停
+        public static Color Label = Color.FromArgb(31, 35, 40);             // 主文字
+        public static Color LabelSecondary = Color.FromArgb(108, 114, 124); // 次级文字
+        public static Color Card = Color.White;
+        public static readonly Color Accent = Color.FromArgb(77, 107, 254); // DeepSeek 蓝
+        public const string FontName = "Segoe UI";                          // Win11 为 Segoe UI Variable
+        public const int TitleBarHeight = 40;                               // 标题栏高度
+        public const int CaptionButtonWidth = 46;                           // 单个标题按钮宽度
+
+        // 主题切换时的默认浅色值（恢复用）
+        public static void ResetLightTheme()
+        {
+            WindowBg = Color.FromArgb(245, 246, 248);
+            Bar = Color.White;
+            Border = Color.FromArgb(222, 224, 229);
+            Separator = Color.FromArgb(234, 236, 240);
+            Hover = Color.FromArgb(240, 241, 245);
+            Pressed = Color.FromArgb(226, 228, 234);
+            Label = Color.FromArgb(31, 35, 40);
+            LabelSecondary = Color.FromArgb(108, 114, 124);
+            Card = Color.White;
+        }
 
         // 精简/服务器版系统上可能没有 Segoe UI，new Font 会抛异常。
         // 统一走这里，逐级回退，保证界面构造不会因为字体而失败。
@@ -260,9 +276,12 @@ namespace DeepSeekHarness
  if (window.__dshUpdateReady) return;
  if (window.top !== window) return;
  window.__dshUpdateReady = true;
- var BTN = 'dsh-desktop-update-btn';
- var listeners = [];
- var state = {phase:'idle'};
+ var BTN='dsh-desktop-update-btn';
+ var listeners=[];
+ var state={phase:'idle'};
+ var pending=false;
+ var lastRun=0;
+ var lastTheme='';
  function label(s){
   if(s.phase==='checking') return '检查更新…';
   if(s.phase==='available') return '新版本' + (s.version ? ' v'+s.version : '');
@@ -276,11 +295,11 @@ namespace DeepSeekHarness
  function busy(s){ return s.phase==='checking'||s.phase==='downloading'||s.phase==='installing'; }
  function render(){
   for (var i=0;i<listeners.length;i++){ try{listeners[i](state);}catch(e){} }
-  var b = document.getElementById(BTN);
+  var b=document.getElementById(BTN);
   if(!b) return;
-  var t = label(state);
-  b.textContent = t;
-  b.setAttribute('aria-label', t);
+  var t=label(state);
+  b.textContent=t;
+  b.setAttribute('aria-label',t);
   if(busy(state)) b.setAttribute('data-busy','1'); else b.removeAttribute('data-busy');
   if(state.phase==='error') b.setAttribute('data-error','1'); else b.removeAttribute('data-error');
   if(state.phase==='idle') b.setAttribute('data-idle','1'); else b.removeAttribute('data-idle');
@@ -290,7 +309,7 @@ namespace DeepSeekHarness
   if(document.getElementById('dsh-desktop-update-css')) return;
   var st=document.createElement('style');
   st.id='dsh-desktop-update-css';
-  st.textContent='#'+BTN+'{position:fixed;left:12px;bottom:12px;z-index:2147483000;display:inline-flex;align-items:center;height:28px;padding:0 10px;margin:0;border:1px solid rgba(128,128,128,0.22);border-radius:8px;background:rgba(128,128,128,0.12);color:inherit;font-family:inherit;font-size:12px;line-height:1;white-space:nowrap;cursor:pointer;backdrop-filter:blur(6px);}'
+  st.textContent='#'+BTN+'{position:fixed;z-index:2147483000;display:inline-flex;align-items:center;height:28px;padding:0 10px;margin:0;border:1px solid rgba(128,128,128,0.22);border-radius:8px;background:rgba(128,128,128,0.12);color:inherit;font-family:inherit;font-size:12px;line-height:1;white-space:nowrap;cursor:pointer;backdrop-filter:blur(6px);}'
    +'#'+BTN+':hover{background:rgba(128,128,128,0.22);}'
    +'#'+BTN+'[data-idle]{opacity:.5;}'
    +'#'+BTN+'[data-busy]{cursor:progress;opacity:.8;}'
@@ -316,7 +335,7 @@ namespace DeepSeekHarness
   return best;
  }
  function settingsBtn(){
-  var cands=document.querySelectorAll('button,a,[role=button],[aria-label]');
+  var cands=document.querySelectorAll('button,a,[role=button]');
   var best=null,bestTop=-1;
   for(var i=0;i<cands.length;i++){
    var el=cands[i];
@@ -330,20 +349,6 @@ namespace DeepSeekHarness
   }
   return best;
  }
- function place(){
-  var b=build();
-  var s=settingsBtn();
-  if(s && s.parentElement && s.parentElement!==document.body){
-   var row=s.parentElement;
-   if(row.lastElementChild!==b){ row.appendChild(b); }
-   b.style.position='static'; b.style.left='auto'; b.style.bottom='auto'; b.style.marginLeft='4px';
-   return b;
-  }
-  var sb=sidebar();
-  b.style.position='fixed'; b.style.marginLeft='0'; b.style.bottom='12px';
-  if(sb) b.style.left=(sb.getBoundingClientRect().left+10)+'px'; else b.style.left='12px';
-  return b;
- }
  function hasNative(){
   var els=document.querySelectorAll('[aria-label]');
   for(var i=0;i<els.length;i++){
@@ -353,14 +358,59 @@ namespace DeepSeekHarness
   }
   return false;
  }
- function tick(){
+ // 按钮常驻 document.body（React 不管理这里），位置动态对齐到设置按钮右侧。
+ // 之前把按钮塞进 React 管理的行容器：React 重渲染会删掉它 → 我们再插回去 →
+// 互相打架，配合 MutationObserver 形成插入/删除风暴，页面会一直卡在 Loading 界面。
+ function place(){
   var b=document.getElementById(BTN);
-  if(!b || !b.isConnected){ style(); b=place(); }
-  b.style.display = hasNative() ? 'none' : 'inline-flex';
-  render();
+  if(!b) return;
+  b.style.position='fixed';
+  var s=settingsBtn();
+  if(s){
+   var r=s.getBoundingClientRect();
+   if(r.width>0){
+    b.style.left=Math.round(r.right+8)+'px';
+    b.style.top=Math.round(r.top+(r.height-b.offsetHeight)/2)+'px';
+    b.style.bottom='auto';
+    return;
+   }
+  }
+  var sb=sidebar();
+  var left=12;
+  if(sb){ var sr=sb.getBoundingClientRect(); if(sr.left<60&&sr.width>40) left=Math.round(sr.left+10); }
+  b.style.left=left+'px';
+  b.style.bottom='12px';
+  b.style.top='auto';
  }
- function boot(){ style(); place(); render(); setInterval(tick,1500);
-  try{ new MutationObserver(tick).observe(document.documentElement,{childList:true,subtree:true}); }catch(e){} }
+ // 把页面背景色上报给桌面壳：标题栏/描边/文字跟着主题切换（深色界面配深色外框）
+ function theme(){
+  try{
+   var c=getComputedStyle(document.body).backgroundColor;
+   if(c && c!==lastTheme){
+    lastTheme=c;
+    try{ window.chrome.webview.postMessage('dsh-theme:'+c); }catch(e){}
+   }
+  }catch(e){}
+ }
+ function tick(){
+  lastRun=Date.now(); pending=false;
+  var b=document.getElementById(BTN);
+  if(!b){ style(); b=build(); }
+  b.style.display = hasNative() ? 'none' : 'inline-flex';
+  place(); render(); theme();
+ }
+ // MutationObserver 回调只登记，真实工作经节流合并 —— 启动期 React 高频改 DOM，
+ // 不节流的话每帧都在全树 querySelector + 强制布局，页面会卡在 Loading 转圈界面。
+ function requestTick(){
+  if(pending) return;
+  pending=true;
+  var wait=600-(Date.now()-lastRun);
+  if(wait<0) wait=0;
+  setTimeout(tick, wait);
+ }
+ function boot(){ style(); tick(); setInterval(tick,2000);
+  try{ new MutationObserver(requestTick).observe(document.documentElement,{childList:true,subtree:true}); }catch(e){}
+ }
  window.__dshDesktopUpdate=function(s){ state=s||{phase:'idle'}; render(); };
  if(!window.dshDesktop){
   window.dshDesktop={protocolVersion:1,updates:{
@@ -958,17 +1008,143 @@ namespace DeepSeekHarness
             }
         }
 
-        // 网页里的更新按钮被点击（window.chrome.webview.postMessage('dsh-update-open')）
+        // 网页发来的两类消息：
+        //   'dsh-update-open'         —— 网页更新按钮被点击，进入升级流程
+        //   'dsh-theme:rgb(r,g,b)'    —— 网页主题背景色上报，标题栏/描边跟着切换
         private void OnWebMessageReceived(object sender, CoreWebView2WebMessageReceivedEventArgs e)
         {
+            string msg = null;
+            try { msg = e.TryGetWebMessageAsString(); } catch { }
+            if (string.IsNullOrEmpty(msg)) return;
+            if (msg.IndexOf("dsh-update-open", StringComparison.Ordinal) >= 0)
+            {
+                if (IsDisposed) return;
+                BeginInvoke(new Action(() => { Task ignored = OnUpdateOpenAsync(); }));
+                return;
+            }
+            if (msg.IndexOf("dsh-theme:", StringComparison.Ordinal) == 0)
+            {
+                Color bg = ParseCssColor(msg.Substring(10));
+                if (!bg.IsEmpty && !IsDisposed)
+                    BeginInvoke(new Action(() => ApplyChromeTheme(bg)));
+            }
+        }
+
+        // 解析 CSS 颜色：支持 rgb(r, g, b) 与 #rrggbb 两种写法（够用即可）
+        private static Color ParseCssColor(string s)
+        {
+            if (string.IsNullOrEmpty(s)) return Color.Empty;
             try
             {
-                string msg = e.TryGetWebMessageAsString();
-                if (string.IsNullOrEmpty(msg) || msg.IndexOf("dsh-update-open", StringComparison.Ordinal) < 0) return;
+                s = s.Trim();
+                if (s[0] == '#')
+                {
+                    string hex = s.Substring(1);
+                    if (hex.Length != 6) return Color.Empty;
+                    int r = Convert.ToInt32(hex.Substring(0, 2), 16);
+                    int g = Convert.ToInt32(hex.Substring(2, 2), 16);
+                    int b = Convert.ToInt32(hex.Substring(4, 2), 16);
+                    return Color.FromArgb(r, g, b);
+                }
+                if (s.IndexOf("rgb", StringComparison.OrdinalIgnoreCase) == 0)
+                {
+                    int a = s.IndexOf('('), b2 = s.IndexOf(')');
+                    if (a < 0 || b2 < 0 || b2 <= a) return Color.Empty;
+                    string[] parts = s.Substring(a + 1, b2 - a - 1).Split(',');
+                    if (parts.Length < 3) return Color.Empty;
+                    return Color.FromArgb(
+                        Clamp255(int.Parse(parts[0].Trim())),
+                        Clamp255(int.Parse(parts[1].Trim())),
+                        Clamp255(int.Parse(parts[2].Trim())));
+                }
             }
-            catch { return; }
+            catch { }
+            return Color.Empty;
+        }
+
+        private static int Clamp255(int v) { return v < 0 ? 0 : (v > 255 ? 255 : v); }
+
+        private static Color Lighten(Color c, double f)
+        {
+            return Color.FromArgb(
+                Clamp255((int)(c.R + (255 - c.R) * f)),
+                Clamp255((int)(c.G + (255 - c.G) * f)),
+                Clamp255((int)(c.B + (255 - c.B) * f)));
+        }
+
+        private static Color Darken(Color c, double f)
+        {
+            return Color.FromArgb(
+                Clamp255((int)(c.R * (1 - f))),
+                Clamp255((int)(c.G * (1 - f))),
+                Clamp255((int)(c.B * (1 - f))));
+        }
+
+        // 让标题栏 / 描边 / 标题按钮跟随网页主题：
+        // 深色界面就配深色标题栏与柔和的同系描边，整窗视觉一体（旧版白标题栏 + 深色
+        // 内容对比太生硬，是用户直接反馈的问题）。浅色主题恢复默认配色。
+        private void ApplyChromeTheme(Color bg)
+        {
             if (IsDisposed) return;
-            BeginInvoke(new Action(() => { Task ignored = OnUpdateOpenAsync(); }));
+            double lum = 0.299 * bg.R + 0.587 * bg.G + 0.114 * bg.B;
+            if (lum < 140)
+            {
+                UI.WindowBg = bg;
+                UI.Bar = bg;
+                UI.Card = Lighten(bg, 0.06);
+                // 描边取界面色与黑之间：看得见轮廓但不扎眼
+                UI.Border = Darken(bg, 0.45);
+                UI.Separator = Lighten(bg, 0.10);
+                UI.Hover = Lighten(bg, 0.12);
+                UI.Pressed = Lighten(bg, 0.20);
+                UI.Label = Color.FromArgb(235, 235, 238);
+                UI.LabelSecondary = Color.FromArgb(158, 162, 170);
+            }
+            else
+            {
+                UI.ResetLightTheme();
+            }
+            try
+            {
+                BackColor = UI.Border; // 1px 描边 = 窗体底色
+                if (titleBar != null && !titleBar.IsDisposed)
+                {
+                    titleBar.BackColor = UI.Bar;
+                    titleBar.Invalidate();
+                }
+                if (titleLabel != null && !titleLabel.IsDisposed)
+                { titleLabel.ForeColor = UI.Label; titleLabel.BackColor = UI.Bar; }
+                if (portBadge != null && !portBadge.IsDisposed)
+                { portBadge.ForeColor = UI.LabelSecondary; portBadge.BackColor = UI.Bar; }
+                if (loadingCard != null && !loadingCard.IsDisposed)
+                {
+                    loadingCard.BackColor = UI.WindowBg;
+                    // 占位卡片里的子控件也跟着换色（卡 loading 时外框同样协调）
+                    int idx = 0;
+                    foreach (Control card in loadingCard.Controls)
+                    {
+                        card.BackColor = UI.Card;
+                        int sub = 0;
+                        foreach (Control t in card.Controls)
+                        {
+                            Label lt = t as Label;
+                            if (lt != null)
+                            {
+                                lt.BackColor = UI.Card;
+                                lt.ForeColor = sub == 0 ? UI.Label : UI.LabelSecondary;
+                            }
+                            sub++;
+                        }
+                        idx++;
+                    }
+                    loadingCard.Invalidate();
+                }
+                if (btnMin != null && !btnMin.IsDisposed) { btnMin.BackColor = UI.Bar; btnMin.Invalidate(); }
+                if (btnMax != null && !btnMax.IsDisposed) { btnMax.BackColor = UI.Bar; btnMax.Invalidate(); }
+                if (btnClose != null && !btnClose.IsDisposed) { btnClose.BackColor = UI.Bar; btnClose.Invalidate(); }
+                Invalidate();
+            }
+            catch { }
         }
 
         private async Task OnUpdateOpenAsync()
@@ -1256,8 +1432,13 @@ namespace DeepSeekHarness
                 Visible = true,
                 ContextMenuStrip = BuildTrayMenu()
             };
-            // 单击托盘图标即恢复主窗口（用户要求比双击更顺手）；双击同样生效无副作用。
-            trayIcon.Click += (s, ev) => ShowForm();
+            // 左键单击 = 恢复主界面；右键只弹托盘菜单（提示栏），不弹主界面。
+            // 注意必须用 MouseClick 且判断按钮 —— NotifyIcon 的 Click 事件左右键都会触发，
+            // 挂在 Click 上就会出现「右键也把主界面拉起来」的行为（用户反馈过）。
+            trayIcon.MouseClick += (s, ev) =>
+            {
+                if (ev.Button == MouseButtons.Left) ShowForm();
+            };
             // 点更新提示气泡直接进升级流程；其它气泡（如端口提示）则恢复窗口
             trayIcon.BalloonTipClicked += (s, ev) =>
             {

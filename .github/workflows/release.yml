@@ -262,6 +262,17 @@ jobs:
             dist/DeepSeekHarness-Setup-*.exe `
             dist/latest.json --clobber
           Write-Host "已覆盖上传至 $env:ASSET_TAG（不新建 Release）"
+          # 清掉旧版本的 zip/Setup 资产（保留 latest.json），Release 页面只留当前版本，
+          # 也避免应用内更新清单与旧安装包混淆。
+          $v = '${{ steps.meta.outputs.version }}'
+          $assets = gh release view "$env:ASSET_TAG" --json assets --jq '.assets[].name'
+          foreach ($n in $assets) {
+            if ($n -eq 'latest.json') { continue }
+            if ($n -like 'DeepSeekHarness-*' -and $n -notlike "*-v$v-*") {
+              Write-Host "删除旧资产: $n"
+              gh release delete-asset "$env:ASSET_TAG" "$n" --yes
+            }
+          }
 
       - name: Upload release assets
         if: steps.meta.outputs.asset_tag == ''
