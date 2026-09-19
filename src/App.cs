@@ -488,6 +488,9 @@ namespace DeepSeekHarness
  // - v0.8.14 起改为**垂直让位**：与窗口按钮区域重叠的顶部控件，作为一组按同一位移
  //   **整体下移**到窗口按钮正下方。x 坐标完全不动 → 水平间距、对齐关系天然不乱；
  //   下拉菜单从按钮自身位置弹出，也不会错位。每轮先还原再重算，布局变化不残留。
+ // - v0.8.16：下移后必须抬升层叠顺序（z-index + 定位），否则会被同级透明覆盖层压住 ——
+ //   表现为图标看得见但 hover / 点击完全没反应（像「按键不存在」）；同时按原始行分行、
+ //   逐行依次下移堆叠，避免应用头部与面板头部两组控件被推到同一基线上互相遮挡。
  var overlapMoved=[];
  function isPopup(el){
   // 弹层（菜单/提示/气泡）跟着触发器走，不参与下移，否则菜单文字会错位
@@ -501,11 +504,23 @@ namespace DeepSeekHarness
   }
   return false;
  }
+ function restoreMoved(){
+  for(var j=0;j<overlapMoved.length;j++){
+   var m=overlapMoved[j];
+   m.el.style.transform='';
+   m.el.style.zIndex=m.z;
+   m.el.style.position=m.pos;
+  }
+  overlapMoved.length=0;
+ }
+ function lift(el){
+  if(getComputedStyle(el).position==='static') el.style.position='relative';
+  el.style.zIndex='60';
+ }
  function clearOverlap(){
   var box=document.getElementById(BOX);
   if(!box) return;
-  for(var j=0;j<overlapMoved.length;j++){ overlapMoved[j].style.transform=''; }
-  overlapMoved.length=0;
+  restoreMoved();
   // 清理 v0.8.11-0.8.13 遗留的占位元素
   var sp=document.getElementById('dsh-cap-spacer');
   if(sp&&sp.parentNode) sp.parentNode.removeChild(sp);
@@ -537,13 +552,32 @@ namespace DeepSeekHarness
    }
    if(!contained) outer.push(hits[a]);
   }
-  // 整组下移：统一对齐到窗口按钮下方 8px 的同一条基线（x 不动）
-  var base=Math.ceil(br.bottom+8);
-  for(var k=0;k<outer.length;k++){
-   var t=Math.ceil(base-outer[k].getBoundingClientRect().top);
-   if(t<=0) continue;
-   outer[k].style.transform='translateY('+t+'px)';
-   overlapMoved.push(outer[k]);
+  // 按原始 top 分行（容忍 8px 误差），行内 x 不动，行间自上而下依次堆叠下移
+  var rows=[];
+  for(var m2=0;m2<outer.length;m2++){
+   var rr=outer[m2].getBoundingClientRect();
+   var row=null;
+   for(var q=0;q<rows.length;q++){
+    if(Math.abs(rows[q].top-rr.top)<=8){ row=rows[q]; break; }
+   }
+   if(!row){ row={top:rr.top,h:rr.height,items:[]}; rows.push(row); }
+   if(rr.height>row.h) row.h=rr.height;
+   row.items.push({el:outer[m2],top:rr.top});
+  }
+  rows.sort(function(p1,p2){ return p1.top-p2.top; });
+  var y=Math.ceil(br.bottom+8);
+  for(var ri=0;ri<rows.length;ri++){
+   for(var ii=0;ii<rows[ri].items.length;ii++){
+    var it=rows[ri].items[ii];
+    var t=Math.ceil(y-it.top);
+    if(t<=0) continue;
+    var e=it.el;
+    var cs=getComputedStyle(e);
+    overlapMoved.push({el:e,z:e.style.zIndex||'',pos:e.style.position||''});
+    lift(e);
+    e.style.transform='translateY('+t+'px)';
+   }
+   y+=rows[ri].h+6;
   }
  }
  function place(){
