@@ -250,6 +250,9 @@ namespace DeepSeekHarness
         private bool navWarned;
         private NotifyIcon trayIcon;
         private bool trayExit;
+        // 本地 dsh 服务是否仍存活（托盘菜单状态下启用；服务挂掉后菜单里标为未运行）
+        private volatile bool serverAlive = true;
+        private ToolStripMenuItem trayStatusItem;
         // 最近一次查到的可用更新（启动时静默检查发现后，点托盘气泡或界面按钮即可升级）
         private UpdateInfo pendingUpdate;
         // 更新流程状态：会同步给网页里的左下角更新按钮（idle/available/downloading/ready…）
@@ -1669,6 +1672,7 @@ namespace DeepSeekHarness
         {
             // 启动阶段失败由 InitializeAsync 的错误弹窗负责，这里只管「已经用起来之后又挂了」
             if (shuttingDown || webView == null) return;
+            serverAlive = false;
             try
             {
                 BeginInvoke(new Action(() =>
@@ -1766,14 +1770,13 @@ namespace DeepSeekHarness
         }
 
         // 托盘常驻：点 X（用户关闭）不直接退出，最小化到托盘并继续运行 dsh 服务，
-        // 避免误关后重开又要等启动。只有「真正退出」菜单或程序自身异常才走彻底关闭。
+        // 避免误关后重开又要等启动。静默收进托盘，不再弹系统气泡提示（用户反馈太吵）。
         protected override void OnFormClosing(FormClosingEventArgs e)
         {
             if (!trayExit && e.CloseReason == CloseReason.UserClosing)
             {
                 e.Cancel = true;
                 Hide();
-                ShowTrayHint();
                 return;
             }
 
@@ -1820,24 +1823,91 @@ namespace DeepSeekHarness
             };
         }
 
+        // 托盘右键菜单：与系统 Win11 菜单观感对齐 —— 顶部品牌头（图标 + 名称 + 版本）、
+        // 服务状态行、分组分隔线、每项配线性图标、悬停圆角高亮、退出项红色。
         private ContextMenuStrip BuildTrayMenu()
         {
             var menu = new ContextMenuStrip();
+            menu.Renderer = new TrayMenuRenderer();
+            menu.ShowImageMargin = true;
+            menu.ImageScalingSize = new Size(16, 16);
+            menu.Font = new Font(UI.FontName, 9f, FontStyle.Regular, GraphicsUnit.Point);
+            menu.Padding = new Padding(4, 6, 4, 6);
+            menu.Opening += delegate
+            {
+                if (trayStatusItem != null)
+                {
+                    trayStatusItem.Text = serverAlive
+                        ? "本地服务运行中 · 127.0.0.1:" + port
+                        : "本地服务未运行";
+                    trayStatusItem.ForeColor = serverAlive
+                        ? Color.FromArgb(122, 130, 144)
+                        : Color.FromArgb(196, 43, 28);
+                }
+            };
+
+            var head = new ToolStripMenuItem("DeepSeek Harness");
+            head.Tag = "head";
+            head.Font = new Font(UI.FontName, 9.5f, FontStyle.Bold, GraphicsUnit.Point);
+            head.Enabled = false;
+            head.Padding = new Padding(0, 3, 8, 3);
+            try
+            {
+                using (Icon ic = Icon.ExtractAssociatedIcon(Application.ExecutablePath))
+                {
+                    if (ic != null) head.Image = new Icon(ic, new Size(16, 16)).ToBitmap();
+                }
+            }
+            catch { }
+
+            trayStatusItem = new ToolStripMenuItem("本地服务运行中");
+            trayStatusItem.Tag = "sub";
+            trayStatusItem.Enabled = false;
+            trayStatusItem.Image = TrayGlyph("dot");
+            trayStatusItem.Padding = new Padding(0, 2, 8, 4);
+
             var open = new ToolStripMenuItem("显示主界面");
+            open.Image = TrayGlyph("show");
             open.Click += (s, ev) => ShowForm();
+
+            var browse = new ToolStripMenuItem("在浏览器打开界面");
+            browse.Image = TrayGlyph("globe");
+            browse.Click += (s, ev) => OpenLocalSite();
+
             var update = new ToolStripMenuItem("检查更新…");
+            update.Image = TrayGlyph("refresh");
             update.Click += async (s, ev) => await RunUpdateFlowAsync(true);
+
             var releases = new ToolStripMenuItem("打开下载页面");
+            releases.Image = TrayGlyph("download");
             releases.Click += (s, ev) => OpenReleasesPage();
-            var about = new ToolStripMenuItem("关于 / 版本 v" + AppInfo.Version);
+
+            var about = new ToolStripMenuItem("关于");
+            about.Image = TrayGlyph("info");
             about.Click += (s, ev) => MessageBox.Show(
                 "DeepSeek Harness 桌面版\r\n\r\n版本：v" + AppInfo.Version +
                 "\r\n本地服务：http://127.0.0.1:" + port +
                 "\r\n\r\n检查更新可获取 GitHub 上的最新版本。",
                 "关于", MessageBoxButtons.OK, MessageBoxIcon.Information);
+
             var exit = new ToolStripMenuItem("真正退出");
+            exit.Image = TrayGlyph("power");
+            exit.ForeColor = Color.FromArgb(196, 43, 28);
             exit.Click += (s, ev) => RequestExit();
+
+            ToolStripMenuItem[] items = new ToolStripMenuItem[] { head, trayStatusItem, open, browse, update, releases, about, exit };
+            for (int i = 0; i < items.Length; i++)
+            {
+                if (items[i].Image != null) items[i].ImageScaling = ToolStripItemImageScaling.None;
+                items[i].ImageAlign = ContentAlignment.MiddleLeft;
+                if (items[i].Padding.Vertical == 0) items[i].Padding = new Padding(0, 4, 8, 4);
+            }
+
+            menu.Items.Add(head);
+            menu.Items.Add(trayStatusItem);
+            menu.Items.Add(new ToolStripSeparator());
             menu.Items.Add(open);
+            menu.Items.Add(browse);
             menu.Items.Add(new ToolStripSeparator());
             menu.Items.Add(update);
             menu.Items.Add(releases);
@@ -1845,6 +1915,128 @@ namespace DeepSeekHarness
             menu.Items.Add(new ToolStripSeparator());
             menu.Items.Add(exit);
             return menu;
+        }
+
+        // 托盘菜单行图标：16×16 线性描边（GDI+ 现画，免打包资源），配色在中性灰上
+        // 深浅色系统菜单下都清晰。
+        private static Bitmap TrayGlyph(string kind)
+        {
+            Bitmap bmp = new Bitmap(16, 16);
+            using (Graphics g = Graphics.FromImage(bmp))
+            {
+                g.SmoothingMode = SmoothingMode.AntiAlias;
+                Color stroke = Color.FromArgb(88, 96, 110);
+                using (Pen p = new Pen(stroke, 1.4f))
+                using (SolidBrush b = new SolidBrush(stroke))
+                {
+                    p.StartCap = LineCap.Round;
+                    p.EndCap = LineCap.Round;
+                    p.LineJoin = LineJoin.Round;
+                    switch (kind)
+                    {
+                        case "show":
+                            g.DrawRectangle(p, 2.2f, 3.4f, 11.6f, 9.2f);
+                            g.DrawLine(p, 2.2f, 6.4f, 13.8f, 6.4f);
+                            break;
+                        case "globe":
+                            g.DrawEllipse(p, 2.2f, 2.2f, 11.6f, 11.6f);
+                            g.DrawEllipse(p, 5.8f, 2.2f, 4.4f, 11.6f);
+                            g.DrawLine(p, 2.2f, 8f, 13.8f, 8f);
+                            break;
+                        case "refresh":
+                            g.DrawArc(p, 2.8f, 2.8f, 10.4f, 10.4f, 45f, 270f);
+                            g.DrawLine(p, 10.6f, 2.0f, 13.2f, 4.6f);
+                            g.DrawLine(p, 13.2f, 4.6f, 10.0f, 5.2f);
+                            break;
+                        case "download":
+                            g.DrawLine(p, 8f, 2.4f, 8f, 9.4f);
+                            g.DrawLine(p, 4.8f, 6.4f, 8f, 9.8f);
+                            g.DrawLine(p, 11.2f, 6.4f, 8f, 9.8f);
+                            g.DrawLine(p, 3.2f, 13.2f, 12.8f, 13.2f);
+                            break;
+                        case "info":
+                            g.DrawEllipse(p, 2.2f, 2.2f, 11.6f, 11.6f);
+                            g.FillEllipse(b, 7.2f, 4.6f, 1.7f, 1.7f);
+                            g.DrawLine(p, 8f, 7.6f, 8f, 11.4f);
+                            break;
+                        case "power":
+                            g.DrawArc(p, 2.6f, 3.2f, 10.8f, 10.4f, -55f, 290f);
+                            g.DrawLine(p, 8f, 1.9f, 8f, 7.6f);
+                            break;
+                        case "dot":
+                            using (SolidBrush gb = new SolidBrush(Color.FromArgb(46, 160, 67)))
+                            {
+                                g.FillEllipse(gb, 5.4f, 5.4f, 5.2f, 5.2f);
+                            }
+                            break;
+                    }
+                }
+            }
+            return bmp;
+        }
+
+        private void OpenLocalSite()
+        {
+            try { Process.Start(new ProcessStartInfo("http://127.0.0.1:" + port) { UseShellExecute = true }); }
+            catch { }
+        }
+
+        // 托盘菜单自绘：品牌头/状态行不随 Enabled=false 变灰，悬停用圆角浅色高亮
+        private sealed class TrayMenuRenderer : ToolStripProfessionalRenderer
+        {
+            public TrayMenuRenderer() : base(new TrayColorTable())
+            {
+                RoundedEdges = true;
+            }
+
+            protected override void OnRenderItemText(ToolStripItemTextRenderEventArgs e)
+            {
+                string tag = e.Item.Tag as string;
+                if (tag == "head") e.TextColor = Color.FromArgb(26, 30, 37);
+                else if (tag == "sub") e.TextColor = e.Item.ForeColor;
+                base.OnRenderItemText(e);
+            }
+
+            protected override void OnRenderItemImage(ToolStripItemImageRenderEventArgs e)
+            {
+                if (e.Item.Tag != null)
+                {
+                    if (e.Image != null) e.Graphics.DrawImage(e.Image, e.ImageRectangle);
+                    return;
+                }
+                base.OnRenderItemImage(e);
+            }
+
+            protected override void OnRenderMenuItemBackground(ToolStripItemRenderEventArgs e)
+            {
+                ToolStripMenuItem mi = e.Item as ToolStripMenuItem;
+                if (mi != null && mi.Selected && mi.Enabled)
+                {
+                    bool danger = mi.ForeColor == Color.FromArgb(196, 43, 28);
+                    Rectangle r = new Rectangle(3, 1, mi.Width - 7, mi.Height - 2);
+                    using (GraphicsPath path = RoundedPath(r, 6))
+                    using (SolidBrush brush = new SolidBrush(danger ? Color.FromArgb(255, 238, 236) : Color.FromArgb(237, 241, 249)))
+                    {
+                        e.Graphics.SmoothingMode = SmoothingMode.AntiAlias;
+                        e.Graphics.FillPath(brush, path);
+                    }
+                    return;
+                }
+                base.OnRenderMenuItemBackground(e);
+            }
+        }
+
+        private sealed class TrayColorTable : ProfessionalColorTable
+        {
+            public override Color ToolStripDropDownBackground { get { return Color.FromArgb(252, 253, 255); } }
+            public override Color MenuBorder { get { return Color.FromArgb(208, 214, 226); } }
+            public override Color MenuItemBorder { get { return Color.Transparent; } }
+            public override Color MenuItemSelected { get { return Color.Transparent; } }
+            public override Color ImageMarginGradientBegin { get { return Color.FromArgb(252, 253, 255); } }
+            public override Color ImageMarginGradientMiddle { get { return Color.FromArgb(252, 253, 255); } }
+            public override Color ImageMarginGradientEnd { get { return Color.FromArgb(252, 253, 255); } }
+            public override Color SeparatorDark { get { return Color.FromArgb(228, 232, 240); } }
+            public override Color SeparatorLight { get { return Color.FromArgb(228, 232, 240); } }
         }
 
         // 从托盘恢复主窗口并置于前台。
@@ -1862,18 +2054,6 @@ namespace DeepSeekHarness
             trayExit = true;
             if (trayIcon != null) trayIcon.Visible = false;
             Close();
-        }
-
-        private void ShowTrayHint()
-        {
-            if (trayIcon == null) return;
-            try
-            {
-                trayIcon.ShowBalloonTip(3000, "DeepSeek Harness",
-                    "已最小化到系统托盘，本地服务仍在运行。单击托盘图标恢复窗口，右键可「真正退出」。",
-                    ToolTipIcon.Info);
-            }
-            catch { }
         }
 
         // ---------- 优雅停止（对齐官方 SIGTERM 行为） ----------
