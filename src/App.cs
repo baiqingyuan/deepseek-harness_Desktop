@@ -481,18 +481,19 @@ namespace DeepSeekHarness
   }
   return false;
  }
- // 窗口按钮固定钉死在右上角，绝不移动。让位改为反向操作：把 dsh 头部右上角的
- // 控件（工作区▾ / 三个点 / 右侧栏 等）整体向左平移，正好落在窗口按钮左侧，
- // 两边各就各位。用 transform 平移而非改布局：不会被容器的 overflow 裁剪、
- // 也不会被绝对定位忽略（v0.8.9 的 padding-right 方案就是把控件推没了）。
- // 只查这一小组选择器（不是全树遍历），配合节流不会重蹈 v0.8.2 的重排风暴。
+ // 窗口按钮固定钉死在右上角，绝不移动。让位不再用 transform / padding 这类「外科手术」
+ // （v0.8.10 的 translateX 会把包含侧边栏的整条头部一起平移 → 侧边栏错位、右侧空白、
+ // 控件群被拆散；v0.8.9 的 padding 会被 overflow 裁剪）。改为在 dsh 头部行（flex/grid
+ // 容器）末尾追加一个固定宽度的占位元素，让布局引擎自己把右上角控件整组推到窗口
+ // 按钮左侧——所有控件一起移动、间距不变、不会被裁剪。React 重渲染删掉后由 tick 补回。
  var CAP_W=140; // 3 个窗口按钮 × 46px，留 2px 余量
  function reserve(){
   var box=document.getElementById(BOX);
+  var sp=document.getElementById('dsh-cap-spacer');
   var cands=document.querySelectorAll(
    'button,a,[role=button],[class*=button],[class*=Button],[class*=trigger],[class*=Trigger],[class*=icon],[class*=Icon]');
   var w=window.innerWidth;
-  var tops=[];
+  var target=null;
   for(var i=0;i<cands.length;i++){
    var el=cands[i];
    if(box&&box.contains(el)) continue;
@@ -500,21 +501,30 @@ namespace DeepSeekHarness
    if(r.width<10||r.width>180||r.height<12||r.height>72) continue;
    if(r.top>56||r.bottom<0) continue;
    if(r.right<w-290) continue; // 只看最右 290px 内的顶部控件
-   tops.push(el);
+   // 沿祖先链找到横贯整行、贴顶的头部行容器
+   var p=el.parentElement, guard=0;
+   while(p&&guard++<10){
+    var pr=p.getBoundingClientRect();
+    if(pr.width>=w*0.9&&pr.top<=8) break;
+    p=p.parentElement;
+   }
+   if(p) target=p;
+   break;
   }
-  if(tops.length===0) return;
-  // 找这些控件的最小公共祖先（即 dsh 的头部门控件容器），整组向左平移
-  var anc=tops[0].parentElement, guard=0;
-  while(anc&&guard++<12){
-   var cnt=0;
-   for(var k=0;k<tops.length;k++){ if(anc.contains(tops[k])) cnt++; }
-   if(cnt>=2) break; // 至少包住其中两个；菜单展开时只有一个可见也照样生效
-   anc=anc.parentElement;
+  if(!target){ if(sp) sp.parentNode&&sp.parentNode.removeChild(sp); return; }
+  var cs=getComputedStyle(target);
+  if(cs.display.indexOf('flex')<0&&cs.display.indexOf('grid')<0) return; // 非弹性布局不动它，避免撑坏结构
+  if(sp&&sp.parentElement!==target){
+   sp.parentNode.removeChild(sp); sp=null;
   }
-  if(anc&&!anc.__dshShift){
-   anc.__dshShift=true;
-   anc.style.transform='translateX(-'+CAP_W+'px)';
-   anc.style.transformOrigin='right center';
+  if(!sp){
+   sp=document.createElement('div');
+   sp.id='dsh-cap-spacer';
+   sp.style.flex='0 0 auto';
+   sp.style.width=CAP_W+'px';
+   sp.style.height='1px';
+   sp.style.pointerEvents='none';
+   target.appendChild(sp);
   }
  }
  function place(){
@@ -666,13 +676,16 @@ namespace DeepSeekHarness
 
         // ---------- 窗口外观 ----------
 
-        // CS_DROPSHADOW：无边框窗口没有系统边框阴影，手动加才有浮起感
+        // CS_DROPSHADOW：无边框窗口没有系统边框阴影，手动加才有浮起感。
+        // WS_MINIMIZEBOX / WS_SYSMENU：无边框窗口缺这两个样式时，窗口处于激活状态
+        // 点击任务栏图标不会最小化（系统认为该窗口不支持最小化），补上即恢复系统行为。
         protected override CreateParams CreateParams
         {
             get
             {
                 CreateParams cp = base.CreateParams;
-                cp.ClassStyle |= 0x00020000;
+                cp.ClassStyle |= 0x00020000;                 // CS_DROPSHADOW
+                cp.Style |= 0x00020000 | 0x00080000;         // WS_MINIMIZEBOX | WS_SYSMENU
                 return cp;
             }
         }
