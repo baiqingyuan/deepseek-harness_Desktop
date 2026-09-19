@@ -265,6 +265,12 @@ namespace DeepSeekHarness
             "https://api.github.com/repos/baiqingyuan/deepseek-harness_Desktop/releases/latest";
         private const string ReleasesPageUrl =
             "https://github.com/baiqingyuan/deepseek-harness_Desktop/releases";
+        // GitHub 的两个域名在网络不通时常常既连不上也不报错（请求一直挂着），
+        // 界面就会永远停在「检查中…」。这里给每次请求都套上硬超时：
+        // 清单 / API 各 12 秒（串行最坏 ~24 秒），再在外面整体兜一层（见 RunUpdateFlowAsync）。
+        private const int CheckTimeoutMs = 12000;
+        // 下载阶段：60 秒一点进度都没有就判定卡死并取消，避免「下载中 12%」挂一整天
+        private const int DownloadStallMs = 60000;
 
         // 注入到 dsh 网页里的「桌面更新」脚本：
         // 1) 挂一个更新按钮，视觉上位于**侧边栏内部**（设置按钮上方一行），
@@ -1874,9 +1880,20 @@ namespace DeepSeekHarness
             catch (Exception ex)
             {
                 PublishUpdateState("error", 0, "", true);
-                if (userInitiated && !WebUpdateUi)
+                if (!userInitiated) return;
+                if (WebUpdateUi)
+                {
+                    // 界面上有按钮时按钮自身会变成「重试更新」，这里再补一条托盘提示，
+                    // 免得用户没注意按钮、以为点了没反应。
+                    ShowBalloon("检查更新失败：" + ex.Message +
+                        "\n请稍后重试，或到 GitHub Releases 页面手动下载（右键托盘可「打开下载页面」）。",
+                        ToolTipIcon.Warning);
+                }
+                else
+                {
                     MessageBox.Show("检查更新失败：" + ex.Message, "检查更新",
                         MessageBoxButtons.OK, MessageBoxIcon.Warning);
+                }
             }
             finally { updateBusy = false; }
         }
@@ -1914,30 +1931,58 @@ namespace DeepSeekHarness
             PublishUpdateState("downloading", 0, info.Version, true);
             ProgressForm progress = WebUpdateUi ? null : new ProgressForm("正在下载更新 v" + info.Version);
             if (progress != null) progress.Show(this);
+
+            WebClient wc = null;
+            System.Threading.Timer watchdog = null;
             try
             {
-                using (WebClient wc = new WebClient())
+                wc = new TimedWebClient(30000);
+                DateTime lastProgress = DateTime.UtcNow;
+                wc.Headers.Add("User-Agent", "DeepSeekHarness-Desktop/" + AppInfo.Version);
+                wc.DownloadProgressChanged += delegate (object s, DownloadProgressChangedEventArgs ev)
                 {
-                    wc.Headers.Add("User-Agent", "DeepSeekHarness-Desktop/" + AppInfo.Version);
-                    wc.DownloadProgressChanged += delegate (object s, DownloadProgressChangedEventArgs ev)
+                    lastProgress = DateTime.UtcNow;
+                    PublishUpdateState("downloading", ev.ProgressPercentage, info.Version, false);
+                    if (progress != null)
+                        progress.UpdateProgress(ev.ProgressPercentage,
+                            FormatSize(ev.BytesReceived), FormatSize(ev.TotalBytesToReceive));
+                };
+                TaskCompletionSource<object> done = new TaskCompletionSource<object>();
+                wc.DownloadFileCompleted += delegate (object s, System.ComponentModel.AsyncCompletedEventArgs ev)
+                {
+                    if (ev.Error != null) done.TrySetException(ev.Error);
+                    else done.TrySetResult(null);
+                };
+                // 看门狗：网络抽风时下载可能既不报错也不推进，一直停在「下载中 x%」。
+                // 超过 DownloadStallMs 没有新进度就主动取消，让界面回到可重试状态。
+                watchdog = new System.Threading.Timer(delegate (object s)
+                {
+                    try
                     {
-                        PublishUpdateState("downloading", ev.ProgressPercentage, info.Version, false);
-                        if (progress != null)
-                            progress.UpdateProgress(ev.ProgressPercentage,
-                                FormatSize(ev.BytesReceived), FormatSize(ev.TotalBytesToReceive));
-                    };
-                    TaskCompletionSource<object> done = new TaskCompletionSource<object>();
-                    wc.DownloadFileCompleted += delegate (object s, System.ComponentModel.AsyncCompletedEventArgs ev)
-                    {
-                        if (ev.Error != null) done.TrySetException(ev.Error);
-                        else done.TrySetResult(null);
-                    };
-                    wc.DownloadFileAsync(new Uri(info.InstallerUrl), file);
-                    await done.Task;
-                }
+                        if ((DateTime.UtcNow - lastProgress).TotalMilliseconds >= DownloadStallMs)
+                            wc.CancelAsync();
+                    }
+                    catch { }
+                }, null, 10000, 10000);
+
+                wc.DownloadFileAsync(new Uri(info.InstallerUrl), file);
+                await done.Task;
+            }
+            catch (Exception ex)
+            {
+                // 下载失败（含超时 / 主动取消）不能再抛给调用方：托盘菜单那条路径没有
+                // try/catch，抛出去就成了未处理异常。统一在这里回到「重试更新」状态。
+                PublishUpdateState("error", 0, info.Version, true);
+                if (!WebUpdateUi && !IsDisposed)
+                    MessageBox.Show("下载更新失败：" + ex.Message +
+                        "\n\n请稍后重试，或到 GitHub Releases 页面手动下载。",
+                        "DeepSeek Harness 更新", MessageBoxButtons.OK, MessageBoxIcon.Warning);
+                return;
             }
             finally
             {
+                if (watchdog != null) { try { watchdog.Dispose(); } catch { } }
+                if (wc != null) { try { wc.Dispose(); } catch { } }
                 if (progress != null) { progress.Close(); progress.Dispose(); }
             }
 
@@ -1997,35 +2042,67 @@ namespace DeepSeekHarness
 
         // 取最新版信息：先读静态清单 latest.json，拿不到再回退 GitHub API。
         // 两者都用正则抽取字段，避免为此引入 JSON 依赖。
+        // 关键：每一步都有超时（见 CheckTimeoutMs）—— 网络不通时 GitHub 的这两个域名
+        // 常常既连不上也不报错，请求会一直挂着，界面上的「检查中…」就永远消不掉。
         private static async Task<UpdateInfo> FetchLatestReleaseAsync()
         {
             try { ServicePointManager.SecurityProtocol |= SecurityProtocolType.Tls12; } catch { }
 
             UpdateInfo info = null;
-            try { info = await FetchManifestAsync(); }
+            try { info = await WithTimeout(FetchManifestAsync(), CheckTimeoutMs); }
             catch { info = null; }
             if (info != null) return info;
 
-            try { info = await FetchApiAsync(); }
+            try { info = await WithTimeout(FetchApiAsync(), CheckTimeoutMs); }
             catch { info = null; }
             return info;
         }
 
-        private static async Task<string> DownloadTextAsync(string url, string accept)
+        // 给任意任务套一层硬超时：超时即抛出，不再无限等待。
+        // 注意：被放弃的那个任务仍在后台跑完自己（HttpClient / WebClient 本身也有 Timeout 兜底），
+        // 这里只保证界面不会卡在「检查中…」上。
+        private static async Task<T> WithTimeout<T>(Task<T> task, int timeoutMs)
         {
-            using (WebClient wc = new WebClient())
+            Task finished = await Task.WhenAny(task, Task.Delay(timeoutMs)).ConfigureAwait(false);
+            if (finished != task) throw new TimeoutException("请求超时（" + (timeoutMs / 1000) + " 秒）");
+            return await task.ConfigureAwait(false);
+        }
+
+        private static async Task<string> DownloadTextAsync(string url, string accept, int timeoutMs)
+        {
+            using (WebClient wc = new TimedWebClient(timeoutMs))
             {
                 wc.Encoding = Encoding.UTF8;
                 wc.Headers.Add("User-Agent", "DeepSeekHarness-Desktop/" + AppInfo.Version);
                 if (!string.IsNullOrEmpty(accept)) wc.Headers.Add("Accept", accept);
-                return await wc.DownloadStringTaskAsync(url);
+                Task<string> download = wc.DownloadStringTaskAsync(url);
+                Task finished = await Task.WhenAny(download, Task.Delay(timeoutMs)).ConfigureAwait(false);
+                if (finished != download)
+                {
+                    try { wc.CancelAsync(); } catch { }
+                    throw new TimeoutException("请求超时（" + (timeoutMs / 1000) + " 秒）");
+                }
+                return await download.ConfigureAwait(false);
+            }
+        }
+
+        // 带超时的 WebClient：WebClient 本身没有 Timeout 属性，只能在创建 WebRequest 时注入。
+        private sealed class TimedWebClient : WebClient
+        {
+            private readonly int timeoutMs;
+            public TimedWebClient(int timeoutMs) { this.timeoutMs = timeoutMs; }
+            protected override WebRequest GetWebRequest(Uri address)
+            {
+                WebRequest r = base.GetWebRequest(address);
+                try { r.Timeout = timeoutMs; } catch { }
+                return r;
             }
         }
 
         // 静态清单：CI 随 Release 上传的 latest.json，无 API 限流
         private static async Task<UpdateInfo> FetchManifestAsync()
         {
-            string json = await DownloadTextAsync(UpdateManifestUrl, "application/json");
+            string json = await DownloadTextAsync(UpdateManifestUrl, "application/json", CheckTimeoutMs);
             if (string.IsNullOrEmpty(json)) return null;
 
             Match v = Regex.Match(json, "\"version\"\\s*:\\s*\"([^\"]+)\"");
@@ -2057,7 +2134,7 @@ namespace DeepSeekHarness
         // 回退：GitHub Releases API（匿名 60 次/小时/IP，可能被限流）
         private static async Task<UpdateInfo> FetchApiAsync()
         {
-            string json = await DownloadTextAsync(UpdateApiUrl, "application/vnd.github+json");
+            string json = await DownloadTextAsync(UpdateApiUrl, "application/vnd.github+json", CheckTimeoutMs);
             if (string.IsNullOrEmpty(json)) return null;
 
             Match tag = Regex.Match(json, "\"tag_name\"\\s*:\\s*\"([^\"]+)\"");
