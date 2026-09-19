@@ -62,6 +62,12 @@ Section "Main" SecMain
   CreateShortcut "$SMPROGRAMS\${APP_NAME}\${APP_NAME}.lnk" "$INSTDIR\${APP_EXE}" "" "$INSTDIR\DeepSeekHarness.ico"
   CreateShortcut "$DESKTOP\${APP_NAME}.lnk" "$INSTDIR\${APP_EXE}" "" "$INSTDIR\DeepSeekHarness.ico"
 
+  ; 覆盖安装会换上新的应用图标：主动通知 Shell + 重建图标缓存，
+  ; 否则桌面/开始菜单/任务栏很可能还继续显示旧图标（缓存按路径命中，文件换了也不重读）。
+  System::Call 'shell32::SHChangeNotify(i 0x08000000, i 0, i 0, i 0)' ; SHCNE_ASSOCCHANGED
+  nsExec::Exec '"$SYSDIR\ie4uinit.exe" -show'
+  Pop $0
+
   ; 卸载程序
   WriteUninstaller "$INSTDIR\Uninstall.exe"
 

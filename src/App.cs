@@ -190,6 +190,34 @@ namespace DeepSeekHarness
         }
 
         public static Font MakeFont(float size) { return MakeFont(size, FontStyle.Regular); }
+
+        // 应用图标统一入口：优先从 exe 同目录的 DeepSeekHarness.ico 里取「正好 px 像素」的那一帧。
+        // 直接用 Icon.ExtractAssociatedIcon 拿到的只有 32px 那一帧，缩到 16px 明显发糊；
+        // 而 icons/DeepSeekHarness.ico 里 16/20/24/32/40/48/64/96/128/256 都齐（见 icons/build-icon.py）。
+        // 返回的 Icon 调用方负责 Dispose。
+        public static Icon LoadAppIcon(int px)
+        {
+            if (px < 8) px = 8;
+            try
+            {
+                string dir = Path.GetDirectoryName(Application.ExecutablePath);
+                if (!string.IsNullOrEmpty(dir))
+                {
+                    string ico = Path.Combine(dir, "DeepSeekHarness.ico");
+                    if (File.Exists(ico)) return new Icon(ico, new Size(px, px));
+                }
+            }
+            catch { }
+            try
+            {
+                using (Icon exe = Icon.ExtractAssociatedIcon(Application.ExecutablePath))
+                {
+                    if (exe != null) return new Icon(exe, new Size(px, px));
+                }
+            }
+            catch { }
+            return null;
+        }
     }
 
     // 崩溃日志：写进 %LOCALAPPDATA%\DeepSeekHarness\logs，便于排查"双击没反应"这类问题
@@ -240,6 +268,7 @@ namespace DeepSeekHarness
         private Panel titleBar;
         private Label titleLabel;
         private Label portBadge;
+        private PictureBox appIcon;
         private Panel loadingCard;
         private Label loadingText;
         private CaptionButton btnMin, btnMax, btnClose;
@@ -731,7 +760,7 @@ namespace DeepSeekHarness
             // 无边框自绘窗口整体双缓冲，缩放/重绘时不再闪
             DoubleBuffered = true;
             Font = UI.MakeFont(9f);
-            try { Icon = Icon.ExtractAssociatedIcon(Application.ExecutablePath); } catch { }
+            try { Icon = UI.LoadAppIcon(32); } catch { }   // 任务栏 / Alt+Tab / 窗口左上角
 
             // 自绘界面若失败，绝不能让应用打不开 —— 降级为系统边框窗口，功能照常可用
             try
@@ -748,7 +777,11 @@ namespace DeepSeekHarness
 
             InitializeTray();
 
-            Shown += async delegate { await InitializeAsync(); };
+            Shown += async delegate
+            {
+                RefreshAppIcon();   // 此刻 DPI 缩放已生效，按控件的真实像素宽度再取一次图标帧
+                await InitializeAsync();
+            };
         }
 
         // 自绘界面初始化失败时的降级路径：退回普通系统窗口，宁可不好看也不能打不开
@@ -760,6 +793,7 @@ namespace DeepSeekHarness
                 titleBar = null;
                 titleLabel = null;
                 portBadge = null;
+                appIcon = null;
                 loadingCard = null;
                 loadingText = null;
                 btnMin = null;
@@ -847,7 +881,7 @@ namespace DeepSeekHarness
             titleBar.MouseDoubleClick += dbl;
 
             // 左侧：程序图标
-            PictureBox appIcon = new PictureBox
+            appIcon = new PictureBox
             {
                 Size = new Size(16, 16),
                 Left = 12,
@@ -856,18 +890,7 @@ namespace DeepSeekHarness
                 BackColor = UI.Bar,
                 Cursor = Cursors.Default // 子控件显式用默认光标，别继承标题带上边缘的缩放光标
             };
-            try
-            {
-                using (Icon ic = Icon.ExtractAssociatedIcon(Application.ExecutablePath))
-                {
-                    if (ic != null)
-                    {
-                        using (Bitmap src = ic.ToBitmap())
-                            appIcon.Image = new Bitmap(src, 16, 16);
-                    }
-                }
-            }
-            catch { appIcon.Visible = false; }
+            RefreshAppIcon(); // 图标帧按控件实际像素宽度取（高 DPI 下 16pt 会被放大成 20/24px）
             appIcon.MouseDown += drag;
             appIcon.MouseDoubleClick += dbl;
 
@@ -917,6 +940,23 @@ namespace DeepSeekHarness
             titleBar.Controls.Add(appIcon);
 
             Controls.Add(titleBar);
+        }
+
+        // 标题带左上角图标：按控件实际像素宽度取图标帧。
+        // 构造期控件还是 16pt（没被 DPI 缩放），高 DPI 下 AutoScaleMode.Dpi 会把它放大到
+        // 20/24/28px —— 那时仍用 16px 的图像就会被拉伸发虚，所以 Shown 里再刷一次。
+        private void RefreshAppIcon()
+        {
+            if (appIcon == null || appIcon.IsDisposed) return;
+            try
+            {
+                int px = appIcon.Width > 0 ? appIcon.Width : 16;
+                using (Icon ic = UI.LoadAppIcon(px))
+                {
+                    if (ic != null) appIcon.Image = ic.ToBitmap();
+                }
+            }
+            catch { appIcon.Visible = false; }
         }
 
         // 标题栏是手写的绝对布局，尺寸变化（含最大化/还原）都要重排右侧元素
@@ -1133,7 +1173,7 @@ namespace DeepSeekHarness
         {
             loadingCard = new BufferedPanel { Dock = DockStyle.Fill, BackColor = UI.WindowBg };
 
-            Panel card = new BufferedPanel { Size = new Size(420, 156), BackColor = UI.WindowBg };
+            Panel card = new BufferedPanel { Size = new Size(420, 168), BackColor = UI.WindowBg };
             card.Paint += delegate (object s, PaintEventArgs e)
             {
                 // 柔和圆角卡片：先铺窗口底色，再画圆角矩形盖上去
@@ -1149,12 +1189,14 @@ namespace DeepSeekHarness
                 }
             };
 
+            // 高度必须给够：12pt 加粗 + 中文回退字体（微软雅黑）一行约 24px，
+            // 之前 Height=26 时 Label 按 rect 裁剪，实测底部被切掉约 6px（用户截图里的「大字被压掉一截」）。
             Label title = new Label
             {
                 Text = "正在启动 DeepSeek Harness…",
                 Font = UI.MakeFont(12f, FontStyle.Bold),
                 ForeColor = UI.Label,
-                Left = 20, Top = 30, Width = 380, Height = 26,
+                Left = 20, Top = 26, Width = 380, Height = 38,
                 TextAlign = ContentAlignment.MiddleCenter,
                 BackColor = UI.Card
             };
@@ -1163,7 +1205,7 @@ namespace DeepSeekHarness
                 Text = "正在启动，请稍候",
                 Font = UI.MakeFont(9f),
                 ForeColor = UI.LabelSecondary,
-                Left = 20, Top = 60, Width = 380, Height = 24,
+                Left = 20, Top = 66, Width = 380, Height = 24,
                 TextAlign = ContentAlignment.MiddleCenter,
                 BackColor = UI.Card
             };
@@ -1171,7 +1213,7 @@ namespace DeepSeekHarness
             // 走马灯（系统原生不确定进度条），比自绘转圈更稳也比纯文字更有反馈
             ProgressBar bar = new ProgressBar
             {
-                Left = 40, Top = 96, Width = 340, Height = 6,
+                Left = 40, Top = 104, Width = 340, Height = 6,
                 Style = ProgressBarStyle.Marquee,
                 MarqueeAnimationSpeed = 30
             };
@@ -1181,7 +1223,7 @@ namespace DeepSeekHarness
                 Text = "v" + AppInfo.Version,
                 Font = UI.MakeFont(8.5f),
                 ForeColor = UI.LabelSecondary,
-                Left = 20, Top = 118, Width = 380, Height = 20,
+                Left = 20, Top = 122, Width = 380, Height = 24,
                 TextAlign = ContentAlignment.MiddleCenter,
                 BackColor = UI.Card
             };
@@ -1913,9 +1955,12 @@ namespace DeepSeekHarness
         // 初始化系统托盘图标与右键菜单（显示主界面 / 真正退出）。
         private void InitializeTray()
         {
+            // 托盘尺寸固定 16px：this.Icon 是 32px 那一帧，交给系统缩会在通知区域发糊，
+            // 这里直接取 .ico 里 16px 的原生帧。Icon 不 Dispose —— NotifyIcon 会一直用着它。
+            Icon trayIco = UI.LoadAppIcon(16);
             trayIcon = new NotifyIcon
             {
-                Icon = this.Icon ?? SystemIcons.Application,
+                Icon = trayIco ?? this.Icon ?? SystemIcons.Application,
                 Text = "DeepSeek Harness",
                 Visible = true,
                 ContextMenuStrip = BuildTrayMenu()
@@ -1969,9 +2014,9 @@ namespace DeepSeekHarness
             head.Padding = new Padding(0, 3, 8, 3);
             try
             {
-                using (Icon ic = Icon.ExtractAssociatedIcon(Application.ExecutablePath))
+                using (Icon ic = UI.LoadAppIcon(16))
                 {
-                    if (ic != null) head.Image = new Icon(ic, new Size(16, 16)).ToBitmap();
+                    if (ic != null) head.Image = ic.ToBitmap();
                 }
             }
             catch { }
