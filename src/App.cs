@@ -324,15 +324,13 @@ namespace DeepSeekHarness
  if (window.__dshUpdateReady) return;
  if (window.top !== window) return;
  window.__dshUpdateReady = true;
- // 更新入口分两处：
- //   1) 「检查更新」= 设置面板里**真正的一个设置项**，不是浮在面板上的独立一层。
- //      做法：克隆一条原生设置行当骨架（字体 / 内边距 / 分隔线 / 悬停样式全都白拿），
- //      清空它的内容后填进我们自己的标题 + 状态说明，再插到那条原生行的**后面**，
- //      成为列表里的兄弟节点 —— 位置完全交给浏览器排版，不可能再错位。
- //      （v0.9.2 用的是 fixed 绝对定位去「吸附」面板底部，面板一识别错整行就半截露在
- //      面板外面、跟设置界面互相盖章，用户看到的就是「多出来一层」。）
- //   2) 侧边栏设置按钮上方的蓝色小胶囊：只在**有新版本**时出现，鼠标移上去展开显示
- //      「更新」，点一下开始下载，按钮上直接显示下载进度。
+ // 更新入口分两处（v0.9.5）：
+ //   1) 「检查更新」= 通用设置列表**最底部**的一条设置项，样式跟其他小条一致：
+//      左侧标题 + 说明文字，右侧一颗独立按钮（检查 / 更新 / 安装 / 重试），
+//      整行不再可以点。只在通用设置页显示，切到插件等其他栏目时整行隐藏，
+//      切回通用时重新插回列表最底下 —— 不会像以前那样串台或跳到最上面。
+ //   2) 侧边栏的蓝色更新胶囊：直接**插进侧边栏内部**（设置按钮上方，跟随侧边栏
+ //      排版滚动），不再用 fixed 浮层另起一层盖在内容上。只在有新版本时出现。
  var ROW='dsh-desktop-update-row';
  var PILL='dsh-desktop-update-pill';
  var listeners=[];
@@ -347,11 +345,9 @@ namespace DeepSeekHarness
  var lastPhase='';
  var panelRef=null;
  var rowBox=null;
- var rowIcon=null;
- var rowIconKind='';
  var rowTitle=null;
  var rowDesc=null;
- var rowRight=null;
+ var rowBtn=null;
  var lastInsert=0;
  // 图标用 DOM 现画（不用 innerHTML 拼 SVG：SVG 属性必须带引号，而这段脚本是
  // 嵌在 C# 逐字字符串里的，引号越少越不容易出岔子）
@@ -408,16 +404,17 @@ namespace DeepSeekHarness
   if(s.phase==='error') return s.version?'下载失败，点击重试':'检查失败，点击重试';
   return appVersion?('当前 v'+appVersion+'，点击检查'):'点击检查是否有新版本';
  }
- // 设置项右侧的短状态（原生行右侧是控件，我们这里是文字）
- function rowRightText(s){
+ // 右侧按钮文字：跟原生行右侧控件一个位置，一颗按钮把「检查 / 更新 / 安装」全接管
+ function rowBtnText(s){
   if(s.phase==='downloading') return (s.percent||0)+'%';
   if(s.phase==='available') return '更新';
   if(s.phase==='ready') return '安装';
+  if(s.phase==='installing') return '…';
   if(s.phase==='error') return '重试';
   if(s.phase==='checking') return '…';
-  return '';
+  return '检查';
  }
- function setRowTitle(s){
+ function rowTitleText(s){
   var hot=s.phase==='available'||s.phase==='ready'||s.phase==='installing';
   return hot?'更新 DeepSeek Harness':'检查更新';
  }
@@ -428,29 +425,35 @@ namespace DeepSeekHarness
   st.id='dsh-desktop-update-css';
   st.textContent=
    // 「检查更新」行：骨架元素带原生类名（原生内边距/字体/分隔线自动继承），
-   // 这里只补我们自己的内部排版，全部走 id 选择器，优先级高于原生类名。
-   '#'+ROW+'{cursor:pointer;overflow:hidden;}'
-   +'#'+ROW+':hover{background:rgba(128,128,128,0.10);}'
-   +'#'+ROW+'[data-busy]{cursor:progress;}'
-   +'#'+ROW+' .dsh-upd-l{display:flex;align-items:center;gap:10px;min-width:0;}'
-   +'#'+ROW+' .dsh-upd-ic{display:inline-flex;align-items:center;justify-content:center;width:16px;height:16px;flex:0 0 auto;opacity:.75;}'
-   +'#'+ROW+' .dsh-upd-tx{display:flex;flex-direction:column;gap:2px;min-width:0;}'
+   // 这里只补我们自己的内部排版。整行不再可点，交互全在右侧按钮上。
+   '#'+ROW+'{overflow:hidden;}'
+   +'#'+ROW+' .dsh-upd-l{display:flex;flex-direction:column;gap:2px;min-width:0;}'
    +'#'+ROW+' .dsh-upd-t{white-space:nowrap;overflow:hidden;text-overflow:ellipsis;}'
    +'#'+ROW+' .dsh-upd-d{font-size:12px;opacity:.62;white-space:nowrap;overflow:hidden;text-overflow:ellipsis;}'
    +'#'+ROW+'[data-error] .dsh-upd-d{color:#E81123;opacity:1;}'
-   +'#'+ROW+' .dsh-upd-r{flex:0 0 auto;display:flex;align-items:center;gap:6px;font-size:12px;opacity:.7;white-space:nowrap;}'
-   // 蓝色胶囊：收起时**只留图标**。v0.9.2 是靠 max-width 裁剪「藏」文字，
-   // 但 flex 的 gap + 文字最小宽度会让「更」的左边缘漏在裁剪线里（截图里那一小条）。
-   // 现在直接给文字 max-width:0/opacity:0 —— 收起时就真的没有文字占位。
-   +'#'+PILL+'{position:fixed;z-index:2147483001;display:none;box-sizing:border-box;align-items:center;justify-content:center;gap:0;height:32px;padding:0 9px;max-width:34px;overflow:hidden;white-space:nowrap;border:0;border-radius:9px;background:#2F6FEB;color:#fff;font-family:inherit;font-size:12px;line-height:1;cursor:pointer;box-shadow:0 4px 14px rgba(47,111,235,.35);transition:max-width .18s ease,background .12s ease;}'
-   +'#'+PILL+':hover{max-width:132px;background:#3B7BF5;}'
-   +'#'+PILL+'[data-wide]{max-width:176px;}'
+   // 右侧按钮：仿原生下拉控件的小胶囊（圆角 + 半透明底 + 悬停变亮）
+   +'#'+ROW+' .dsh-upd-btn{flex:0 0 auto;display:inline-flex;align-items:center;justify-content:center;'
+   +'min-width:64px;padding:5px 14px;border:0;border-radius:8px;background:rgba(128,128,128,.18);'
+   +'color:inherit;font-family:inherit;font-size:12px;line-height:1.4;cursor:pointer;white-space:nowrap;}'
+   +'#'+ROW+' .dsh-upd-btn:hover{background:rgba(128,128,128,.30);}'
+   +'#'+ROW+'[data-busy] .dsh-upd-btn{cursor:progress;opacity:.7;}'
+   // 蓝色胶囊：现在**住在侧边栏里面**（文档流内，跟着侧边栏排版/滚动），
+   // 不再是 fixed 浮层。收起态只有图标，悬停展开文字。
+   +'#'+PILL+'{display:none;box-sizing:border-box;align-items:center;justify-content:center;gap:0;'
+   +'height:32px;width:calc(100% - 24px);margin:0 12px 10px;flex:0 0 auto;overflow:hidden;'
+   +'white-space:nowrap;border:0;border-radius:9px;background:#2F6FEB;color:#fff;'
+   +'font-family:inherit;font-size:12px;line-height:1;cursor:pointer;'
+   +'box-shadow:0 4px 14px rgba(47,111,235,.35);}'
+   +'#'+PILL+':hover{background:#3B7BF5;}'
    +'#'+PILL+'[data-busy]{cursor:progress;}'
    +'#'+PILL+' .dsh-upd-ic{display:inline-flex;align-items:center;justify-content:center;width:16px;height:16px;flex:0 0 auto;}'
-   +'#'+PILL+' .dsh-upd-lb{flex:0 0 auto;display:inline-block;max-width:0;opacity:0;overflow:hidden;white-space:nowrap;transition:max-width .18s ease,opacity .14s ease,margin-left .18s ease;}'
+   +'#'+PILL+' .dsh-upd-lb{flex:0 0 auto;display:inline-block;max-width:0;opacity:0;overflow:hidden;'
+   +'white-space:nowrap;transition:max-width .18s ease,opacity .14s ease,margin-left .18s ease;}'
    +'#'+PILL+':hover .dsh-upd-lb{max-width:150px;opacity:1;margin-left:6px;}'
    +'#'+PILL+'[data-wide] .dsh-upd-lb{max-width:150px;opacity:1;margin-left:6px;}'
-   +'#'+PILL+' .dsh-upd-bar{position:absolute;left:0;bottom:0;height:2px;width:0;background:rgba(255,255,255,.6);display:none;}';
+   +'#'+PILL+' .dsh-upd-bar{position:absolute;left:0;bottom:0;height:2px;width:0;background:rgba(255,255,255,.6);display:none;}'
+   // 胶囊里的进度条需要定位基准
+   +'#'+PILL+'{position:relative;}';
   (document.head||document.documentElement).appendChild(st);
  }
  function build(){
@@ -464,9 +467,8 @@ namespace DeepSeekHarness
    var pbar=document.createElement('span'); pbar.className='dsh-upd-bar';
    p.appendChild(pic); p.appendChild(plb); p.appendChild(pbar);
    p.addEventListener('click', function(){ if(p.getAttribute('data-busy')) return; send(); });
-   document.body.appendChild(p);
   }
-  return true;
+  return p;
  }
  function sidebar(){
   var cands=document.querySelectorAll('aside,nav,[class*=sidebar],[class*=Sidebar]');
@@ -493,6 +495,20 @@ namespace DeepSeekHarness
    if(r.top>bestTop){best=el;bestTop=r.top;}
   }
   return best;
+ }
+ // 把胶囊挂进侧边栏内部：优先插到「设置按钮在侧边栏里的最外层祖先」前面
+ // （即设置按钮上方），找不到设置按钮就追加到侧边栏末尾。
+ function mountPill(p){
+  var sb=sidebar();
+  if(!sb){ p.style.display='none'; return; }
+  var g=settingsBtn();
+  var anchor=null, n=g;
+  while(n&&n.parentElement!==sb) n=n.parentElement;
+  if(n&&n.parentElement===sb) anchor=n;
+  if(p.parentElement!==sb||p.nextSibling!==anchor){
+   if(anchor&&anchor.parentElement===sb) sb.insertBefore(p,anchor);
+   else sb.appendChild(p);
+  }
  }
  // 点设置按钮的一瞬间记一份「当前可见的大块元素」快照：随后出现的、不在快照里的大面板
  // 就是设置面板本身。比按类名/结构猜稳得多（dsh 的类名是哈希过的，猜不出来）。
@@ -559,6 +575,12 @@ namespace DeepSeekHarness
   }
   panelRef=settingsPanel();
   return panelRef;
+ }
+ // 当前设置面板是否停在「通用」栏目：通用页有 语言/外观/字号 这些标志性条目。
+ // 切到插件等其他栏目时整行隐藏，避免串台；切回通用再插回来。
+ function generalTab(p){
+  var t=p.textContent||'';
+  return /外观|字号大小|繁忙时的发送行为|语言|Appearance|Language|Font size/.test(t);
  }
  // 量出一条原生设置行「文字左边缘到行左边缘」的距离 —— 直接拿来当我们的内边距，
  // 这样插进去的那一行跟上下原生行的缩进完全对齐（原生内边距往往在内层元素上，量不到就用 12）。
@@ -654,17 +676,28 @@ namespace DeepSeekHarness
   var last=keep[keep.length-1];
   return {host:last.el.parentElement||p, donor:last.el, pad:last.pad, h:last.h};
  }
- // 用骨架造出「检查更新」这一行并插进列表里（骨架的下一条，位置由排版决定）。
+ // 用骨架造出「检查更新」这一行，**追加到列表容器最末尾**（通用设置最下面），
+ // 不再「插在骨架行后面」—— 骨架行上面可能还有分组标题，尾插才是稳定的「最下面」。
  function buildRow(info){
-  var donor=info.donor, host=info.host;
-  var o=donor.cloneNode(false);   // 只克隆外层骨架（类名/样式），不带原生内容
-  // 先清掉原生行带来的 id / aria-* / role / data-* 等属性（只留 class 与 style），
-  // 再挂我们自己的 id —— 顺序反了会把刚设的 id 一起清掉，那就会每 600ms 重复插一行。
-  var at=o.attributes;
-  for(var i=at.length-1;i>=0;i--){
-   var nm=at[i].name;
-   if(nm==='class'||nm==='style') continue;
-   o.removeAttribute(nm);
+  var o=makeRow(info);
+  info.host.appendChild(o);
+  return true;
+ }
+ function makeRow(info){
+  var donor=info?info.donor:null, host=info?info.host:null;
+  var o;
+  if(donor){
+   o=donor.cloneNode(false);   // 只克隆外层骨架（类名/样式），不带原生内容
+   // 先清掉原生行带来的 id / aria-* / role / data-* 等属性（只留 class 与 style），
+   // 再挂我们自己的 id —— 顺序反了会把刚设的 id 一起清掉，那就会每 600ms 重复插一行。
+   var at=o.attributes;
+   for(var i=at.length-1;i>=0;i--){
+    var nm=at[i].name;
+    if(nm==='class'||nm==='style') continue;
+    o.removeAttribute(nm);
+   }
+  }else{
+   o=document.createElement('div');
   }
   o.id=ROW;
   o.style.display='flex';
@@ -674,107 +707,77 @@ namespace DeepSeekHarness
   o.style.width='100%';
   o.style.boxSizing='border-box';
   o.style.textAlign='left';
-  o.style.cursor='pointer';
-  o.style.minHeight=(info.h>0?info.h:48)+'px';
-  var px=(info.pad>=0?info.pad:12);
+  if(info&&info.h>0) o.style.minHeight=info.h+'px';
+  var px=(info&&info.pad>=0)?info.pad:12;
   o.style.paddingLeft=px+'px';
   o.style.paddingRight=px+'px';
-  // 左侧只放标题 + 说明：原生设置行左侧就是纯文字，图标若放左边会把我们的标题
-  // 推开 26px，跟上下行对不齐（实测差值 26px）。图标改挂到右侧状态那一组，
-  // 位置正好对应原生行「右侧控件」的位置，更像原生的一行。
+  // 左侧只放标题 + 说明（跟原生行左侧一致），交互全在右侧按钮上
   var l=document.createElement('span'); l.className='dsh-upd-l';
-  var tx=document.createElement('span'); tx.className='dsh-upd-tx';
   rowTitle=document.createElement('span'); rowTitle.className='dsh-upd-t';
   rowTitle.textContent='检查更新';
   rowDesc=document.createElement('span'); rowDesc.className='dsh-upd-d';
-  tx.appendChild(rowTitle); tx.appendChild(rowDesc);
-  l.appendChild(tx);
-  var ic=document.createElement('span'); ic.className='dsh-upd-ic'; setIcon(ic,'sync');
-  rowRight=document.createElement('span'); rowRight.className='dsh-upd-r';
-  var rs=document.createElement('span'); rs.className='dsh-upd-rs';
-  rowRight.appendChild(ic); rowRight.appendChild(rs);
-  o.appendChild(l); o.appendChild(rowRight);
-  rowBox=o; rowIcon=ic; rowIconKind='sync';
-  o.addEventListener('click', function(){ if(o.getAttribute('data-busy')) return; send(); });
-  if(donor.nextSibling) host.insertBefore(o,donor.nextSibling);
-  else host.appendChild(o);
-  return true;
+  l.appendChild(rowTitle); l.appendChild(rowDesc);
+  rowBtn=document.createElement('button');
+  rowBtn.type='button';
+  rowBtn.className='dsh-upd-btn';
+  rowBtn.textContent='检查';
+  rowBtn.addEventListener('click', function(ev){
+   ev.stopPropagation();
+   if(o.getAttribute('data-busy')) return;
+   send();
+  });
+  o.appendChild(l); o.appendChild(rowBtn);
+  rowBox=o;
+  return o;
  }
- // 实在找不到可克隆的原生行（面板结构不熟）时的兜底：直接作为面板的最后一个子节点
- // 追加上去 —— 依然是「在面板里」的流式布局，不会像绝对定位那样跑到面板外面去。
+ // 兜底：找不到可克隆的原生行时，按同样结构造一行（自带内边距）。
  function fallbackRow(p){
-  var o=document.createElement('div');
-  o.id=ROW;
-  o.style.display='flex';
-  o.style.alignItems='center';
-  o.style.justifyContent='space-between';
-  o.style.gap='12px';
-  o.style.boxSizing='border-box';
-  o.style.padding='10px 16px';
-  o.style.cursor='pointer';
-  var l=document.createElement('span'); l.className='dsh-upd-l';
-  var tx=document.createElement('span'); tx.className='dsh-upd-tx';
-  rowTitle=document.createElement('span'); rowTitle.className='dsh-upd-t';
-  rowTitle.textContent='检查更新';
-  rowDesc=document.createElement('span'); rowDesc.className='dsh-upd-d';
-  tx.appendChild(rowTitle); tx.appendChild(rowDesc);
-  l.appendChild(tx);
-  var ic=document.createElement('span'); ic.className='dsh-upd-ic'; setIcon(ic,'sync');
-  rowRight=document.createElement('span'); rowRight.className='dsh-upd-r';
-  var rs=document.createElement('span'); rs.className='dsh-upd-rs';
-  rowRight.appendChild(ic); rowRight.appendChild(rs);
-  o.appendChild(l); o.appendChild(rowRight);
-  rowBox=o; rowIcon=ic; rowIconKind='sync';
-  o.addEventListener('click', function(){ if(o.getAttribute('data-busy')) return; send(); });
-  p.appendChild(o);
+  p.appendChild(makeRow(null));
   return true;
  }
  function ensureRow(){
-  if(document.getElementById(ROW)) return true;
-  if(Date.now()-lastInsert<600) return false;  // 插入节流：React 抖 DOM 时别反复插
   var p=panelNow();
-  if(!p) return false;
-  lastInsert=Date.now();
+  var r=document.getElementById(ROW);
+  // 面板不在了，或不在通用栏目 → 这一行不该出现
+  if(!p||!generalTab(p)){
+   if(r&&r.parentElement) r.parentElement.removeChild(r);
+   return false;
+  }
+  if(r){
+   // 已在面板里：钉在列表容器最下面（React 重排把它挤上去就搬回去）
+   if(r.nextSibling) r.parentElement.appendChild(r);
+   return true;
+  }
+  if(Date.now()-lastInsert<600) return false;  // 插入节流：React 抖 DOM 时别反复插
   var info=null;
   try{ info=findDonor(p); }catch(e){ info=null; }
+  lastInsert=Date.now();
   return info?buildRow(info):fallbackRow(p);
- }
- // 蓝色胶囊：贴在侧边栏「设置」按钮正上方一行（与设置按钮同列），侧边栏收起时隐藏。
- function placePill(p){
-  var sb=sidebar();
-  if(!sb){ p.style.display='none'; return; }
-  var sr=sb.getBoundingClientRect();
-  p.style.left=Math.round(sr.left+12)+'px';
-  var g=settingsBtn();
-  if(g){
-   var gr=g.getBoundingClientRect();
-   if(gr.top>sr.top&&gr.left<sr.right){ p.style.top=Math.round(gr.top-32-8)+'px'; return; }
-  }
-  p.style.top=Math.round(sr.bottom-32-14-34)+'px';
  }
  function render(){
   for(var i=0;i<listeners.length;i++){ try{listeners[i](state);}catch(e){} }
   var now=Date.now();
   var repos=(state.phase!==lastPhase)||(now-lastPlace>400);
   if(repos){ lastPhase=state.phase; lastPlace=now; }
-  // 设置面板里那一行（被 React 重渲染删掉就补回来）
+  // 设置面板里那一行（被 React 重渲染删掉就补回来；不在通用栏目就隐藏）
   ensureRow();
   var r=document.getElementById(ROW);
   if(r){
-   if(rowTitle) rowTitle.textContent=setRowTitle(state);
+   if(rowTitle&&r.contains(rowTitle)) rowTitle.textContent=rowTitleText(state);
+   else if(rowTitle===null){ var t=r.querySelector('.dsh-upd-t'); if(t) rowTitle=t; if(rowTitle) rowTitle.textContent=rowTitleText(state); }
+   if(!rowDesc){ rowDesc=r.querySelector('.dsh-upd-d'); }
    if(rowDesc) rowDesc.textContent=rowDescText(state);
-   var rs=rowRight&&rowRight.querySelector('.dsh-upd-rs');
-   if(rs) rs.textContent=rowRightText(state);
-   var kind=(state.phase==='available'||state.phase==='downloading')?'down':'sync';
-   if(rowIcon&&kind!==rowIconKind){ setIcon(rowIcon,kind); rowIconKind=kind; }
-   if(busy(state)) r.setAttribute('data-busy','1'); else r.removeAttribute('data-busy');
-   if(state.phase==='error') r.setAttribute('data-error','1'); else r.removeAttribute('data-error');
+   if(!rowBtn){ rowBtn=r.querySelector('.dsh-upd-btn'); }
+   if(rowBtn){
+    rowBtn.textContent=rowBtnText(state);
+    if(busy(state)) r.setAttribute('data-busy','1'); else r.removeAttribute('data-busy');
+    if(state.phase==='error') r.setAttribute('data-error','1'); else r.removeAttribute('data-error');
+   }
   }
-  var p=document.getElementById(PILL);
-  if(!p) return;
-  if(!pillVisible(state)){ p.style.display='none'; return; }
-  if(p.style.display!=='inline-flex'){ p.style.display='inline-flex'; placePill(p); }
-  else if(repos) placePill(p);
+  var p=build();
+  if(!pillVisible(state)||!sidebar()){ p.style.display='none'; return; }
+  if(repos||p.parentElement===null||p.parentElement===document.body) mountPill(p);
+  if(p.style.display!=='inline-flex'){ p.style.display='inline-flex'; }
   var lb=p.querySelector('.dsh-upd-lb');
   if(lb) lb.textContent=pillText(state);
   var pic=p.querySelector('.dsh-upd-ic');
@@ -814,7 +817,7 @@ namespace DeepSeekHarness
  }
  function tick(){
   lastRun=Date.now(); pending=false;
-  if(!document.getElementById(PILL)) style();
+  if(!document.getElementById('dsh-desktop-update-css')) style();
   build(); render(); theme();
  }
  // MutationObserver 回调只登记，真实工作经节流合并 —— 启动期 React 高频改 DOM，
