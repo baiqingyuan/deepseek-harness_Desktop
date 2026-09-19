@@ -529,14 +529,22 @@ namespace DeepSeekHarness
  }
  // 碰撞兜底：占位元素只对 flex/grid 行内子项有效，dsh 头部还有个别绝对定位的控件
  // （如右上角的 ✕）推不动，会盖到窗口按钮上。每轮定位后扫描与窗口按钮区域重叠的
- // 网页控件，只把这几个「漏网」元素单独平移让开——影响面最小，不会动到其他布局。
+ // 网页控件，把它们作为**一组**按同一位移整组左移 —— 组内间距保持不变，图标不会
+ // 贴脸也不会被拆散（排版对齐 WorkBuddy 头部：窗口按钮钉死右上，页面控件组在左
+ // 侧等距排开）。位移每轮先整体还原再按当前布局重算，侧边栏开合 / 窗口缩放后不会
+ // 残留旧偏移，视觉位置与点击目标始终一致（此前逐元素独立平移 + 只移不还原，
+ // 曾导致图标错位乱排、点击落到别的控件上）。
+ var overlapMoved=[];
  function clearOverlap(){
   var box=document.getElementById(BOX);
   if(!box) return;
+  for(var j=0;j<overlapMoved.length;j++){ overlapMoved[j].style.transform=''; }
+  overlapMoved.length=0;
   var br=box.getBoundingClientRect();
   if(br.width===0) return;
   var cands=document.querySelectorAll(
    'button,a,[role=button],[class*=button],[class*=Button],[class*=trigger],[class*=Trigger],[class*=icon],[class*=Icon]');
+  var hits=null,maxRight=0;
   for(var i=0;i<cands.length;i++){
    var el=cands[i];
    if(box.contains(el)) continue;
@@ -544,11 +552,18 @@ namespace DeepSeekHarness
    if(r.width<6||r.height<10) continue;
    if(r.top>56||r.bottom<0) continue;
    if(r.right>br.left+2&&r.left<br.right-2){ // 与窗口按钮区重叠
-    if(!el.__dshMoved){
-     el.__dshMoved=true;
-     el.style.transform='translateX(-'+Math.ceil(br.right-r.left+6)+'px)';
-    }
+    if(!hits) hits=[];
+    hits.push(el);
+    if(r.right>maxRight) maxRight=r.right;
    }
+  }
+  if(!hits) return;
+  // 整组左移：让最右元素的右缘停在窗口按钮左侧 6px，组内每位移量相同
+  var delta=Math.floor((br.left-6)-maxRight);
+  if(delta>=0) return;
+  for(var k=0;k<hits.length;k++){
+   hits[k].style.transform='translateX('+delta+'px)';
+   overlapMoved.push(hits[k]);
   }
  }
  function place(){
