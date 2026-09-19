@@ -513,6 +513,25 @@ namespace DeepSeekHarness
   }
   overlapMoved.length=0;
  }
+ // 命中元素 → 控件整体单元：向上找紧贴的容器（宽高差 < 16px、不是整行、不套住别的命中
+ // 控件），这样「图标 + 圆角外框 + 下拉箭头」作为整体一起移动，不会留下空方框。
+ function unitOf(el,hits){
+  var best=el, cur=el;
+  for(var g=0;g<6;g++){
+   var p=cur.parentElement;
+   if(!p||p===document.body||p===document.documentElement) break;
+   var pr=p.getBoundingClientRect();
+   var cr=cur.getBoundingClientRect();
+   if(pr.width>window.innerWidth*0.6) break;
+   if(pr.width<8||pr.height<8) break;
+   if(Math.abs(pr.width-cr.width)>=16||Math.abs(pr.height-cr.height)>=16) break;
+   var holds=false;
+   for(var i=0;i<hits.length;i++){ if(hits[i]!==cur&&p.contains(hits[i])){ holds=true; break; } }
+   if(holds) break;
+   best=p; cur=p;
+  }
+  return best;
+ }
  function lift(el){
   if(getComputedStyle(el).position==='static') el.style.position='relative';
   el.style.zIndex='60';
@@ -542,15 +561,25 @@ namespace DeepSeekHarness
    }
   }
   if(!hits) return;
-  // 只保留最外层命中元素：外层按钮容器和它内部的图标常常同时命中，
-  // 两层都平移会让位移叠加（图标被推到分隔线以下），且行高对不齐。
-  var outer=[];
+  // 先把命中元素收敛成「控件整体单元」：命中点常是按钮内部的一层，而按钮的圆角外框
+  // 属于更外层的容器。只移内层 → 外框留在原地变成空方框、图标却跑到别处（v0.8.16）。
+  // 因此向上找紧贴、尺寸几乎相同、且不包含其他命中控件的祖先，把它作为整体一起移。
+  var units=[];
   for(var a=0;a<hits.length;a++){
-   var contained=false;
-   for(var b=0;b<hits.length;b++){
-    if(a!==b&&hits[b]!==hits[a]&&hits[b].contains(hits[a])){ contained=true; break; }
+   var u=unitOf(hits[a],hits);
+   if(u) units.push(u);
+  }
+  // 去掉重复项和被其他单元包含的（同一控件的内层）
+  var outer=[];
+  for(var c1=0;c1<units.length;c1++){
+   var skip=false;
+   for(var c0=0;c0<c1;c0++){ if(units[c0]===units[c1]){ skip=true; break; } }
+   if(!skip){
+    for(var c2=0;c2<units.length;c2++){
+     if(units[c2]!==units[c1]&&units[c2].contains(units[c1])){ skip=true; break; }
+    }
    }
-   if(!contained) outer.push(hits[a]);
+   if(!skip) outer.push(units[c1]);
   }
   // 按原始 top 分行（容忍 8px 误差），行内 x 不动，行间自上而下依次堆叠下移
   var rows=[];
