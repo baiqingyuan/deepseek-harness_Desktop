@@ -481,37 +481,46 @@ namespace DeepSeekHarness
   }
   return false;
  }
- // dsh 网页头部右上角有它自己的控件（工作区选择、面板按钮等，且不认识 window.dshDesktop
- // 桥接，不会给我们让位）。窗口按钮不能盖在它们上面 —— 每次定位时扫描顶部条最右侧的
- // 控件，把窗口按钮放到它们左边；顶部右侧没有可交互元素时贴回右上角。
+ // 窗口按钮固定钉死在右上角，绝不移动（之前按网页控件位置动态避让，点工作区/三个点
+ // 弹出菜单后几何一变按钮就跟着回弹，观感很差）。让位改为反向操作：给 dsh 头部容器
+ // 注入右内边距，把网页自己的右上角控件往左推，永远腾出三个按钮的宽度。
  // 只查这一小组选择器（不是全树遍历），配合节流不会重蹈 v0.8.2 的重排风暴。
- function topRightCluster(){
+ var CAP_W=140; // 3 个按钮 × 46px，留 2px 余量
+ var reservedEl=null;
+ function reserve(){
+  var box=document.getElementById(BOX);
   var cands=document.querySelectorAll(
    'button,a,[role=button],[class*=button],[class*=Button],[class*=trigger],[class*=Trigger],[class*=icon],[class*=Icon]');
-  var box=document.getElementById(BOX);
-  var minL=-1;
   var w=window.innerWidth;
   for(var i=0;i<cands.length;i++){
    var el=cands[i];
-   if(box && box.contains(el)) continue;
+   if(box&&box.contains(el)) continue;
    var r=el.getBoundingClientRect();
    if(r.width<10||r.width>180||r.height<12||r.height>72) continue;
    if(r.top>56||r.bottom<0) continue;
-   if(r.left<w*0.35) continue;
    if(r.right<w-280) continue; // 只看最右 280px 内的顶部控件
-   if(minL<0||r.left<minL) minL=r.left;
+   // 沿祖先链找一个横贯整行、贴顶的容器（dsh 的 header），给它注入右内边距
+   var p=el.parentElement, guard=0;
+   while(p&&guard++<10){
+    var pr=p.getBoundingClientRect();
+    if(pr.width>=w*0.6&&pr.top<=8){ break; }
+    p=p.parentElement;
+   }
+   if(p&&!p.__dshPad){
+    p.__dshPad=true;
+    p.style.paddingRight=CAP_W+'px';
+    p.style.boxSizing='border-box';
+    if(!reservedEl) reservedEl=p;
+   }
+   break;
   }
-  return minL;
  }
  function place(){
   var box=document.getElementById(BOX);
   if(!box) return;
-  var cl=topRightCluster();
-  if(cl<0){ box.style.left='auto'; box.style.right='0px'; return; }
-  var x=Math.round(cl-box.offsetWidth-8);
-  if(x<0){ box.style.left='auto'; box.style.right='0px'; return; } // 极端窄窗放不下：贴角兜底
-  box.style.right='auto';
-  box.style.left=x+'px';
+  box.style.left='auto';
+  box.style.right='0px';
+  reserve();
  }
  window.__dshCaptionPlace=place;
  function build(){
