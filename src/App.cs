@@ -295,61 +295,136 @@ namespace DeepSeekHarness
  if (window.__dshUpdateReady) return;
  if (window.top !== window) return;
  window.__dshUpdateReady = true;
- var BTN='dsh-desktop-update-btn';
+ // v0.9.2 起更新入口分两处（都挂在 document.body 上，不塞进 React 管理的容器，
+ // 避免 React 重渲染把它删掉、我们再加回来形成插入风暴把页面卡死）：
+ //   1) 设置面板里加一行「检查更新」——手动入口，顺便显示当前版本/最新状态；
+ //   2) 侧边栏设置按钮上方的蓝色小胶囊——只在**有新版本**时出现，鼠标移上去展开
+ //      显示「更新」，点一下开始下载，按钮上直接显示下载进度。
+ var ROW='dsh-desktop-update-row';
+ var PILL='dsh-desktop-update-pill';
  var listeners=[];
  var state={phase:'idle'};
+ var appVersion='';
  var pending=false;
  var lastRun=0;
  var lastTheme='';
- function label(s){
-  if(s.phase==='checking') return '检查更新…';
-  if(s.phase==='available') return '新版本' + (s.version ? ' v'+s.version : '');
-  if(s.phase==='downloading') return '下载中 ' + (s.percent||0) + '%';
-  if(s.phase==='ready') return '安装并重启';
-  if(s.phase==='installing') return '正在安装…';
-  if(s.phase==='uptodate') return '已是最新版';
-  if(s.phase==='error') return '重试更新';
-  return '检查更新';
+ var preOpen=[];
+ var gearAt=0;
+ var lastPlace=0;
+ var lastPhase='';
+ // 图标用 DOM 现画（不用 innerHTML 拼 SVG：SVG 属性必须带引号，而这段脚本是
+ // 嵌在 C# 逐字字符串里的，引号越少越不容易出岔子）
+ var SVGNS='http://www.w3.org/2000/svg';
+ function icon(kind){
+  var s=document.createElementNS(SVGNS,'svg');
+  s.setAttribute('viewBox','0 0 16 16');
+  s.setAttribute('width','14');
+  s.setAttribute('height','14');
+  s.setAttribute('fill','none');
+  s.setAttribute('stroke','currentColor');
+  s.setAttribute('stroke-width','1.6');
+  s.setAttribute('stroke-linecap','round');
+  s.setAttribute('stroke-linejoin','round');
+  var d=kind==='sync'
+   ?['M13.4 8A5.4 5.4 0 1 1 11.6 4','M13.5 1.9v3.3h-3.3']
+   :['M8 2.6v7.3','M4.9 7.1 8 10.2l3.1-3.1','M3.2 13.2h9.6'];
+  for(var i=0;i<d.length;i++){
+   var pa=document.createElementNS(SVGNS,'path');
+   pa.setAttribute('d',d[i]);
+   s.appendChild(pa);
+  }
+  return s;
+ }
+ function setIcon(host,kind){
+  if(!host) return;
+  while(host.firstChild) host.removeChild(host.firstChild);
+  host.appendChild(icon(kind));
  }
  function busy(s){ return s.phase==='checking'||s.phase==='downloading'||s.phase==='installing'; }
- function render(){
-  for (var i=0;i<listeners.length;i++){ try{listeners[i](state);}catch(e){} }
-  var b=document.getElementById(BTN);
-  if(!b) return;
-  var t=label(state);
-  b.textContent=t;
-  b.setAttribute('aria-label',t);
-  if(busy(state)) b.setAttribute('data-busy','1'); else b.removeAttribute('data-busy');
-  if(state.phase==='error') b.setAttribute('data-error','1'); else b.removeAttribute('data-error');
-  if(state.phase==='idle') b.setAttribute('data-idle','1'); else b.removeAttribute('data-idle');
+ // 蓝色胶囊只在「有新版本、正在下载、等待安装、安装中」这几种状态出现；
+ // 检查失败时若已知版本号（多半是下载中断）也保留，否则连版本都不知道，藏起来不误导。
+ function pillVisible(s){
+  return s.phase==='available'||s.phase==='downloading'||s.phase==='ready'
+   ||s.phase==='installing'||(s.phase==='error'&&s.version)
+   ||(s.phase==='checking'&&s.version);
+ }
+ function pillText(s){
+  if(s.phase==='checking') return '检查中…';
+  if(s.phase==='downloading') return '下载中 '+(s.percent||0)+'%';
+  if(s.phase==='ready') return '安装并重启';
+  if(s.phase==='installing') return '正在安装…';
+  if(s.phase==='error') return '重试下载';
+  return '更新';
+ }
+ function rowText(s){
+  if(s.phase==='checking') return '检查中…';
+  if(s.phase==='downloading') return '下载中 '+(s.percent||0)+'%';
+  if(s.phase==='available') return s.version?('发现 v'+s.version):'发现新版本';
+  if(s.phase==='ready') return '待安装 v'+(s.version||'');
+  if(s.phase==='installing') return '正在安装…';
+  if(s.phase==='uptodate') return '已是最新';
+  if(s.phase==='error') return s.version?'下载失败，点击重试':'检查失败，点击重试';
+  return appVersion?('当前 v'+appVersion):'';
  }
  function send(){ try{ window.chrome.webview.postMessage('dsh-update-open'); }catch(e){} }
  function style(){
   if(document.getElementById('dsh-desktop-update-css')) return;
   var st=document.createElement('style');
   st.id='dsh-desktop-update-css';
-  st.textContent='#'+BTN+'{position:fixed;z-index:2147483000;display:inline-flex;align-items:center;height:28px;padding:0 10px;margin:0;border:1px solid rgba(128,128,128,0.22);border-radius:8px;background:rgba(128,128,128,0.12);color:inherit;font-family:inherit;font-size:12px;line-height:1;white-space:nowrap;cursor:pointer;backdrop-filter:blur(6px);}'
-   +'#'+BTN+':hover{background:rgba(128,128,128,0.22);}'
-   +'#'+BTN+'[data-idle]{opacity:.5;}'
-   +'#'+BTN+'[data-busy]{cursor:progress;opacity:.8;}'
-   +'#'+BTN+'[data-error]{border-color:#E81123;color:#E81123;opacity:1;}';
+  st.textContent=
+   '#'+ROW+'{position:fixed;z-index:2147483000;display:none;box-sizing:border-box;align-items:center;justify-content:space-between;gap:10px;height:40px;padding:0 12px;border:0;border-radius:8px;background:transparent;color:inherit;font-family:inherit;font-size:13px;line-height:1;text-align:left;cursor:pointer;overflow:hidden;}'
+   +'#'+ROW+':hover{background:rgba(128,128,128,0.14);}'
+   +'#'+ROW+'[data-busy]{cursor:progress;}'
+   +'#'+ROW+' .dsh-upd-l{display:inline-flex;align-items:center;gap:8px;white-space:nowrap;}'
+   +'#'+ROW+' .dsh-upd-ic{display:inline-flex;align-items:center;justify-content:center;width:16px;height:16px;flex:0 0 auto;opacity:.75;}'
+   +'#'+ROW+' .dsh-upd-r{font-size:12px;opacity:.6;white-space:nowrap;overflow:hidden;text-overflow:ellipsis;}'
+   +'#'+ROW+'[data-error] .dsh-upd-r{color:#E81123;opacity:1;}'
+   +'#'+PILL+'{position:fixed;z-index:2147483001;display:none;box-sizing:border-box;align-items:center;gap:6px;height:32px;padding:0 9px;max-width:34px;overflow:hidden;white-space:nowrap;border:0;border-radius:9px;background:#2F6FEB;color:#fff;font-family:inherit;font-size:12px;line-height:1;cursor:pointer;box-shadow:0 4px 14px rgba(47,111,235,.35);transition:max-width .18s ease,padding .18s ease,background .12s ease;}'
+   +'#'+PILL+':hover{max-width:130px;background:#3B7BF5;}'
+   +'#'+PILL+'[data-wide]{max-width:170px;}'
+   +'#'+PILL+'[data-busy]{cursor:progress;}'
+   +'#'+PILL+' .dsh-upd-ic{display:inline-flex;align-items:center;justify-content:center;width:16px;height:16px;flex:0 0 auto;}'
+   +'#'+PILL+' .dsh-upd-lb{flex:1 1 auto;padding-right:2px;}'
+   +'#'+PILL+' .dsh-upd-bar{position:absolute;left:0;bottom:0;height:2px;width:0;background:rgba(255,255,255,.6);display:none;}';
   (document.head||document.documentElement).appendChild(st);
  }
  function build(){
-  var b=document.getElementById(BTN);
-  if(b) return b;
-  b=document.createElement('button');
-  b.id=BTN; b.type='button'; b.textContent='检查更新';
-  b.addEventListener('click', function(){ if(b.getAttribute('data-busy')) return; send(); });
-  document.body.appendChild(b);
-  return b;
+  var r=document.getElementById(ROW);
+  if(!r){
+   r=document.createElement('button');
+   r.id=ROW;
+   r.type='button';
+   var l=document.createElement('span'); l.className='dsh-upd-l';
+   var ic=document.createElement('span'); ic.className='dsh-upd-ic'; setIcon(ic,'sync');
+   var t=document.createElement('span'); t.className='dsh-upd-t'; t.textContent='检查更新';
+   l.appendChild(ic); l.appendChild(t);
+   var v=document.createElement('span'); v.className='dsh-upd-r';
+   r.appendChild(l); r.appendChild(v);
+   r.addEventListener('click', function(){ if(r.getAttribute('data-busy')) return; send(); });
+   document.body.appendChild(r);
+  }
+  var p=document.getElementById(PILL);
+  if(!p){
+   p=document.createElement('button');
+   p.id=PILL;
+   p.type='button';
+   var pic=document.createElement('span'); pic.className='dsh-upd-ic'; setIcon(pic,'down');
+   var plb=document.createElement('span'); plb.className='dsh-upd-lb'; plb.textContent='更新';
+   var pbar=document.createElement('span'); pbar.className='dsh-upd-bar';
+   p.appendChild(pic); p.appendChild(plb); p.appendChild(pbar);
+   p.addEventListener('click', function(){ if(p.getAttribute('data-busy')) return; send(); });
+   document.body.appendChild(p);
+  }
+  return true;
  }
  function sidebar(){
   var cands=document.querySelectorAll('aside,nav,[class*=sidebar],[class*=Sidebar]');
   var best=null,bestH=0;
   for(var i=0;i<cands.length;i++){
-   var r=cands[i].getBoundingClientRect();
-   if(r.left<60 && r.width>120 && r.width<560 && r.height>300 && r.height>bestH){best=cands[i];bestH=r.height;}
+   var t=cands[i];
+   if(t.id===ROW||t.id===PILL) continue;
+   var r=t.getBoundingClientRect();
+   if(r.left<60 && r.width>44 && r.width<560 && r.height>300 && r.height>bestH){best=t;bestH=r.height;}
   }
   return best;
  }
@@ -358,7 +433,7 @@ namespace DeepSeekHarness
   var best=null,bestTop=-1;
   for(var i=0;i<cands.length;i++){
    var el=cands[i];
-   if(el.id===BTN) continue;
+   if(el.id===ROW||el.id===PILL) continue;
    var r=el.getBoundingClientRect();
    if(r.width<8||r.height<8) continue;
    if(r.left>320 || r.top < window.innerHeight*0.5) continue;
@@ -368,39 +443,131 @@ namespace DeepSeekHarness
   }
   return best;
  }
- function hasNative(){
-  var els=document.querySelectorAll('[aria-label]');
-  for(var i=0;i<els.length;i++){
-   if(els[i].id===BTN) continue;
-   var a=els[i].getAttribute('aria-label');
-   if(a && /^(新版本|Update|安装并重启|Install and Restart|重试更新|Retry update|下载中)/.test(a)) return true;
+ // 点设置按钮的一瞬间记一份「当前可见的大块元素」快照：随后出现的、不在快照里的大面板
+ // 就是设置面板本身。比按类名/结构猜稳得多（dsh 的类名是哈希过的，猜不出来）。
+ function snapshot(){
+  preOpen=[];
+  var all=document.querySelectorAll('div,section,aside,main,form');
+  for(var i=0;i<all.length;i++){
+   var r=all[i].getBoundingClientRect();
+   if(r.width>=300&&r.height>=220) preOpen.push(all[i]);
   }
+ }
+ function wasOpen(el){
+  for(var i=0;i<preOpen.length;i++){ if(preOpen[i]===el) return true; }
   return false;
  }
- // 按钮常驻 document.body（React 不管理这里），视觉上定位到**侧边栏内部**：
- // 侧边栏内、设置按钮上方一行。侧边栏收起（找不到符合条件的侧边栏）时按钮隐藏，
-// 与侧边栏同步出现 / 消失。
- // 之前把按钮塞进 React 管理的行容器：React 重渲染会删掉它 → 我们再插回去 →
-// 互相打架，配合 MutationObserver 形成插入/删除风暴，页面会一直卡在 Loading 界面。
- function place(){
-  var b=document.getElementById(BTN);
-  if(!b) return;
-  var sb=sidebar();
-  if(!sb){ b.style.display='none'; return; }
-  b.style.position='fixed';
-  var sr=sb.getBoundingClientRect();
-  b.style.bottom='auto';
-  b.style.left=Math.round(sr.left+12)+'px';
-  var s=settingsBtn();
-  if(s){
-   var r=s.getBoundingClientRect();
-   // 设置按钮在侧边栏内：放到它上方一行，视觉上属于侧边栏
-   if(r.top>sr.top && r.left<sr.right){
-    b.style.top=Math.round(r.top-b.offsetHeight-8)+'px';
-    return;
-   }
+ function opaque(el){
+  try{
+   var c=getComputedStyle(el).backgroundColor;
+   if(!c||c==='transparent') return false;
+   var m=c.match(/rgba\(([^)]+)\)/);
+   if(!m) return true;
+   var p=m[1].split(',');
+   if(p.length===4&&parseFloat(p[3])<0.55) return false;
+   return true;
+  }catch(e){ return false; }
+ }
+ function settingsPanel(){
+  var best=null,bestA=0;
+  function consider(el){
+   if(!el||el.id===ROW||el.id===PILL) return;
+   if(el.contains(document.getElementById(ROW))) return;
+   var r=el.getBoundingClientRect();
+   if(r.width<300||r.height<220) return;
+   if(window.innerWidth-r.width<40&&window.innerHeight-r.height<40) return; // 整页容器不算面板
+   var a=r.width*r.height;
+   if(a>bestA){bestA=a;best=el;}
   }
-  b.style.top=Math.round(sr.bottom-b.offsetHeight-14)+'px';
+  var i;
+  // 语义化对话框优先（这类不依赖快照，重开也能认出来）
+  var dlg=document.querySelectorAll('[role=dialog],[role=alertdialog],[aria-modal=true]');
+  for(i=0;i<dlg.length;i++) consider(dlg[i]);
+  if(best) return best;
+  if(Date.now()-gearAt>20000) return null; // 快照过期，不做结构猜测，宁可不显示
+  var all=document.querySelectorAll('div,section,aside,main,form');
+  for(i=0;i<all.length;i++){
+   var el=all[i];
+   if(el.id===ROW||el.id===PILL) continue;
+   if(wasOpen(el)) continue;
+   var cs=getComputedStyle(el);
+   if(cs.position!=='fixed'&&cs.position!=='absolute') continue;
+   if(cs.display==='none'||cs.visibility==='hidden') continue;
+   if(!opaque(el)) continue;
+   consider(el);
+  }
+  return best;
+ }
+ // 设置面板里那一行：贴面板底部内边距对齐；若面板底部本来就有按钮行（保存/完成之类），
+ // 自动往上让开一行，不会盖住它。
+ function placeRow(r){
+  var p=settingsPanel();
+  if(!p){ r.style.display='none'; return; }
+  var pr=p.getBoundingClientRect();
+  var pad=12,h=40,lift=0;
+  var btns=p.querySelectorAll('button,[role=button]');
+  for(var i=0;i<btns.length;i++){
+   var b=btns[i];
+   if(b.id===ROW||b.id===PILL||b===r) continue;
+   var br=b.getBoundingClientRect();
+   if(br.width<20||br.height<18) continue;
+   if(br.bottom>pr.bottom-8&&br.top>pr.bottom-104) lift=Math.max(lift, pr.bottom-8-br.top+8);
+  }
+  var w=Math.min(560,Math.max(220,pr.width-pad*2));
+  r.style.display='flex';
+  r.style.left=Math.round(pr.left+pad)+'px';
+  r.style.width=Math.round(w)+'px';
+  r.style.top=Math.round(pr.bottom-pad-h-lift)+'px';
+ }
+ // 蓝色胶囊：贴在侧边栏「设置」按钮正上方一行（与设置按钮同列），侧边栏收起时隐藏。
+ function placePill(p){
+  var sb=sidebar();
+  if(!sb){ p.style.display='none'; return; }
+  var sr=sb.getBoundingClientRect();
+  p.style.left=Math.round(sr.left+12)+'px';
+  var g=settingsBtn();
+  if(g){
+   var gr=g.getBoundingClientRect();
+   if(gr.top>sr.top&&gr.left<sr.right){ p.style.top=Math.round(gr.top-32-8)+'px'; return; }
+  }
+  p.style.top=Math.round(sr.bottom-32-14-34)+'px';
+ }
+ function render(){
+  for(var i=0;i<listeners.length;i++){ try{listeners[i](state);}catch(e){} }
+  var r=document.getElementById(ROW);
+  var p=document.getElementById(PILL);
+  var now=Date.now();
+  var repos=(state.phase!==lastPhase)||(now-lastPlace>400);
+  if(repos){ lastPhase=state.phase; lastPlace=now; }
+  if(r){
+   var rr=r.querySelector('.dsh-upd-r');
+   if(rr) rr.textContent=rowText(state);
+   if(busy(state)) r.setAttribute('data-busy','1'); else r.removeAttribute('data-busy');
+   if(state.phase==='error') r.setAttribute('data-error','1'); else r.removeAttribute('data-error');
+   if(repos) placeRow(r);
+  }
+  if(!p) return;
+  if(!pillVisible(state)){ p.style.display='none'; return; }
+  if(p.style.display!=='inline-flex'){ p.style.display='inline-flex'; placePill(p); }
+  else if(repos) placePill(p);
+  var lb=p.querySelector('.dsh-upd-lb');
+  if(lb) lb.textContent=pillText(state);
+  var ic=p.querySelector('.dsh-upd-ic');
+  if(ic) setIcon(ic,(state.phase==='ready'||state.phase==='installing')?'sync':'down');
+  if(state.phase==='available'){
+   p.removeAttribute('data-wide');
+   p.removeAttribute('data-busy');
+  }else{
+   p.setAttribute('data-wide','1');
+   if(busy(state)) p.setAttribute('data-busy','1'); else p.removeAttribute('data-busy');
+  }
+  var bar=p.querySelector('.dsh-upd-bar');
+  if(bar){
+   if(state.phase==='downloading'){ bar.style.display='block'; bar.style.width=Math.max(3,Math.min(100,state.percent||0))+'%'; }
+   else if(state.phase==='ready'||state.phase==='installing'){ bar.style.display='block'; bar.style.width='100%'; }
+   else { bar.style.display='none'; bar.style.width='0'; }
+  }
+  p.title=state.version?('DeepSeek Harness v'+state.version+' 可用，点击开始下载'):'检查更新';
  }
  // 把页面背景色上报给桌面壳：标题栏/描边/文字跟着主题切换（深色界面配深色外框）
  function theme(){
@@ -422,26 +589,34 @@ namespace DeepSeekHarness
  }
  function tick(){
   lastRun=Date.now(); pending=false;
-  var b=document.getElementById(BTN);
-  if(!b){ style(); b=build(); }
-  // 侧边栏不在（收起/隐藏）或官方原生更新入口存在：按钮一律隐藏
-  if(!sidebar() || hasNative()){ b.style.display='none'; render(); theme(); return; }
-  b.style.display='inline-flex';
-  place(); render(); theme();
+  if(!document.getElementById(ROW)||!document.getElementById(PILL)) style();
+  build(); render(); theme();
  }
  // MutationObserver 回调只登记，真实工作经节流合并 —— 启动期 React 高频改 DOM，
  // 不节流的话每帧都在全树 querySelector + 强制布局，页面会卡在 Loading 转圈界面。
  function requestTick(){
   if(pending) return;
   pending=true;
-  var wait=600-(Date.now()-lastRun);
+  var wait=500-(Date.now()-lastRun);
   if(wait<0) wait=0;
   setTimeout(tick, wait);
  }
- function boot(){ style(); tick(); setInterval(tick,2000);
+ function boot(){
+  style(); tick(); setInterval(tick,1500);
+  // 点设置按钮时抓一份快照，用来认出随后出现的设置面板
+  document.addEventListener('mousedown',function(e){
+   try{
+    var g=settingsBtn();
+    if(g&&e.target&&(g===e.target||g.contains(e.target))){ gearAt=Date.now(); snapshot(); }
+   }catch(err){}
+  },true);
   try{ new MutationObserver(requestTick).observe(document.documentElement,{childList:true,subtree:true}); }catch(e){}
  }
- window.__dshDesktopUpdate=function(s){ state=s||{phase:'idle'}; render(); };
+ window.__dshDesktopUpdate=function(s){
+  state=s||{phase:'idle'};
+  if(s&&s.current) appVersion=s.current;
+  render();
+ };
  if(!window.dshDesktop){
   window.dshDesktop={protocolVersion:1,updates:{
    status:function(){ return Promise.resolve(state); },
@@ -623,7 +798,8 @@ namespace DeepSeekHarness
         {
             base.OnResize(e);
             LayoutChrome();
-            SyncCaptionMaxState(); // 网页右上角窗口按钮的 最大化/还原图标 跟着切
+            LayoutContent();
+            SyncCaptionMaxState(); // 网页侧的最大化状态同步（边缘热区停用）
         }
 
         // v0.9.0 起不再用贴边透明抓手做缩放。老方案的三个毛病（实测确认）：
@@ -767,6 +943,41 @@ namespace DeepSeekHarness
                 portBadge.Top = (h - portBadge.Height) / 2;
                 portBadge.Left = Math.Max(48, titleBar.Width - right - bw * 3 - portBadge.Width - 16);
             }
+        }
+
+        // 标题带下沿：网页内容应该从这里开始
+        private int ContentTop
+        {
+            get
+            {
+                if (titleBar != null && !titleBar.IsDisposed && titleBar.Visible) return titleBar.Height;
+                return 0;
+            }
+        }
+
+        // 内容区（启动占位卡片 / 网页视图）统一显式定位到标题带下方。
+        // v0.9.1 里这两块控件都用 Dock=Fill：无边框窗口中停靠顺序由 z 序决定，
+        // WebView2 又是独立子窗口，实测网页顶端第一行（logo 行 / 「切换、预设」按钮）
+        // 被标题带压掉了一截 —— 用户看到的就是「上边框遮挡，内界面要往下挪」。
+        // 改成算好矩形直接赋 Bounds，网页顶端一定从标题带下沿开始。
+        private void LayoutContent()
+        {
+            Rectangle r = new Rectangle(0, ContentTop, Math.Max(0, ClientSize.Width),
+                Math.Max(0, ClientSize.Height - ContentTop));
+            try
+            {
+                if (loadingCard != null && !loadingCard.IsDisposed)
+                {
+                    loadingCard.Dock = DockStyle.None;
+                    loadingCard.Bounds = r;
+                }
+                if (webView != null && !webView.IsDisposed)
+                {
+                    webView.Dock = DockStyle.None;
+                    webView.Bounds = r;
+                }
+            }
+            catch { }
         }
 
         // 窗口四周的缩放热区宽度（网页侧与标题带共用同一数值）
@@ -1050,8 +1261,8 @@ namespace DeepSeekHarness
                 UpdatePortBadge();
                 await InitializeWebViewAsync(startUrl, envTask);
                 if (!string.IsNullOrEmpty(portNotice)) ShowBalloon(portNotice, ToolTipIcon.Info);
-                // 界面就绪后再静默查一次更新，有新版只在左下角按钮提示，不打断使用
-                await RunUpdateFlowAsync(false);
+                // 界面就绪后静默查一次更新：有新版就把侧边栏那颗蓝色胶囊点亮，不打断使用
+                await RunUpdateFlowAsync(false, false);
             }
             catch (Exception ex)
             {
@@ -1194,16 +1405,18 @@ namespace DeepSeekHarness
             WebView2 view = null;
             try
             {
-                view = new WebView2 { Dock = DockStyle.Fill };
+                view = new WebView2 { Dock = DockStyle.None };
                 Controls.Add(view);
+                view.Bounds = new Rectangle(0, ContentTop, Math.Max(0, ClientSize.Width),
+                    Math.Max(0, ClientSize.Height - ContentTop));
 
                 await view.EnsureCoreWebView2Async(env);
 
-                // 网页里的「侧边栏更新按钮」与一体化标题栏：每个文档创建时都注入，
-                // 刷新/跳转后依然在。注入完成后网页会上报 dsh-chrome-ready，
-                // 桌面壳随即隐藏兜底标题栏（窗口按钮改由网页右上角渲染）。
+                // 网页侧注入：设置面板里的「检查更新」行 + 侧边栏那颗「有新版本」蓝色胶囊
+                // （都挂在 document.body 上）+ 边缘缩放热区 + 主题色上报。窗口按钮、标题带
+                // 由桌面壳自己负责（v0.9.1 起不再注入网页右上角）。
                 // 注意 API 名带 Async 后缀（WebView2 SDK 1.0.4129.50），写成不带 Async 的旧名会编译不过。
-                // 注入失败不能影响主流程（界面照常可用、兜底标题栏保持可见），所以只记日志。
+                // 注入失败不能影响主流程（界面照常可用、更新改由托盘菜单触发），所以只记日志。
                 try
                 {
                     await view.CoreWebView2.AddScriptToExecuteOnDocumentCreatedAsync(UpdateBridgeScript);
@@ -1230,6 +1443,7 @@ namespace DeepSeekHarness
                 // WebView 就绪，移除启动占位卡片
                 RemoveLoadingPlaceholder();
                 webView = view;
+                LayoutContent(); // 再对齐一次（标题带高度/客户端尺寸以这一刻为准）
                 // 当前状态立刻同步一次：若启动时已静默查到新版本，按钮一出现就是「新版本」
                 PublishUpdateState(updatePhase, updatePercent, pendingUpdate == null ? "" : pendingUpdate.Version, true);
             }
@@ -1242,7 +1456,7 @@ namespace DeepSeekHarness
         }
 
         // 网页发来的消息：
-        //   'dsh-update-open'  —— 网页更新按钮被点击，进入升级流程
+        //   'dsh-update-open'  —— 网页侧更新入口被点击（设置里的检查更新行 / 侧边栏蓝色胶囊）
         //   'dsh-theme:...'    —— 网页主题背景色上报，标题带等兜底界面跟着切换
         //   'dsh-chrome-ready' —— 网页侧边缘缩放热区就绪，同步一次最大化状态
         //   'dsh-resize:方向'  —— 网页侧判定鼠标在窗口边缘按下，开始缩放
@@ -1402,6 +1616,10 @@ namespace DeepSeekHarness
             catch { }
         }
 
+        // 网页侧更新入口被点击。三种情况：
+        //   1) 安装包已下载好 → 这一下就是「安装并重启」
+        //   2) 已经查到新版本（pendingUpdate）→ 直接开始下载，进度回传到按钮上
+        //   3) 还没查过（用户点的是设置里的「检查更新」）→ 只检查，查到把蓝色胶囊点亮
         private async Task OnUpdateOpenAsync()
         {
             if (updateBusy) return;
@@ -1417,7 +1635,9 @@ namespace DeepSeekHarness
                 await DownloadUpdateAsync(pendingUpdate, pendingUpdate.Mandatory);
                 return;
             }
-            await RunUpdateFlowAsync(true);
+            // 还没查过：这次只是「检查」，查到有新版就把界面上的蓝色胶囊点亮等用户点，
+            // 不替用户直接开下（进度与安装都由那颗按钮驱动）。
+            await RunUpdateFlowAsync(true, false);
         }
 
         private void OnNavigationCompleted(object sender, CoreWebView2NavigationCompletedEventArgs e)
@@ -1772,7 +1992,7 @@ namespace DeepSeekHarness
 
             var update = new ToolStripMenuItem("检查更新…");
             update.Image = TrayGlyph("refresh");
-            update.Click += async (s, ev) => await RunUpdateFlowAsync(true);
+            update.Click += async (s, ev) => await RunUpdateFlowAsync(true, true);
 
             var releases = new ToolStripMenuItem("打开下载页面");
             releases.Image = TrayGlyph("download");
@@ -2093,19 +2313,23 @@ namespace DeepSeekHarness
                 ? "null"
                 : "\"" + version.Replace("\\", "\\\\").Replace("\"", "\\\"") + "\"";
             string js = "if(window.__dshDesktopUpdate)window.__dshDesktopUpdate({phase:'" +
-                        phase + "',percent:" + percent + ",version:" + v + "});";
+                        phase + "',percent:" + percent + ",version:" + v +
+                        ",current:'" + AppInfo.Version + "'});";
             try { webView.ExecuteScriptAsync(js); } catch { }
         }
 
         // 统一的更新流程：检查 → 下载 → 界面上点「安装并重启」→ 关闭自己静默安装 → 装完自动拉起。
-        // userInitiated=false 用于启动时的静默检查，只在左下角挂个「新版本」，不打断使用。
-        private async Task RunUpdateFlowAsync(bool userInitiated)
+        //   userInitiated=false     启动时的静默检查，只把「有新版本」发布到界面/托盘气泡
+        //   downloadWhenFound=false 只查不下（设置里的「检查更新」走这条：查到了把蓝色
+        //                           胶囊点亮，用户点它才开始下载，进度显示在按钮上）
+        private async Task RunUpdateFlowAsync(bool userInitiated, bool downloadWhenFound)
         {
             if (updateBusy) return;
             updateBusy = true;
             try
             {
-                PublishUpdateState("checking", 0, "", false);
+                // 保留已知的版本号：重新检查时界面上的蓝色胶囊不会先消失再出现（闪一下）
+                PublishUpdateState("checking", 0, pendingUpdate == null ? "" : pendingUpdate.Version, false);
                 UpdateInfo info = await FetchLatestReleaseAsync();
                 if (info == null)
                 {
@@ -2143,8 +2367,10 @@ namespace DeepSeekHarness
                 {
                     if (!ConfirmUpdate(info)) { PublishUpdateState("available", 0, info.Version, true); return; }
                 }
-                else if (!userInitiated)
+                else if (!downloadWhenFound)
                 {
+                    // 只报告「发现新版本」：界面上的蓝色胶囊 / 设置里的那一行会亮起来，
+                    // 什么时候下载由用户点按钮决定，下载进度也显示在那个按钮上。
                     PublishUpdateState("available", 0, info.Version, true);
                     if (!WebUpdateUi)
                         ShowBalloon("发现新版本 v" + info.Version + "，点此升级（或右键托盘选「检查更新…」）。",
