@@ -2,6 +2,13 @@
 
 本项目所有重要改动记录于此。格式参考 [Keep a Changelog](https://keepachangelog.com/)，版本号遵循 [语义化版本](https://semver.org/lang/zh-CN/)。
 
+## [0.8.20] - 2026-09-19
+
+### Fixed
+- **无法拖动窗口边缘缩放**：原来的 8 个透明抓手是 WinForms 控件，被 WebView2 子窗口（airspace 规则）完全盖住，收不到鼠标事件。现改为由网页判定边缘热区（6px）并上报方向、桌面壳转发 `WM_NCLBUTTONDOWN` 进入系统缩放循环，同时在边缘显示缩放光标；最大化时禁用边缘缩放，顶边改为拖动还原。
+- **窗口四周的硬边「齿轮轮廓」**：自绘 1px 矩形描边在高 DPI 下被放大成锯齿状硬边。去掉描边与 1px 内缩（`Padding=0`），窗口轮廓交给系统投影体现。
+- **「在浏览器打开界面」提示 dsh web authentication required**：裸访问根路径没有凭据。改为复用启动时 dsh 打印的带 token 地址（并去掉行尾 `(LAN: …)` 等标点），token 变化时随打印刷新。
+
 ## [0.8.19] - 2026-09-19
 
 ### Changed

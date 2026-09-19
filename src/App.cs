@@ -678,11 +678,49 @@ namespace DeepSeekHarness
  }
  // 最大化状态变化时由桌面壳回调，切换最大化 / 还原图标
  window.__dshCaptionMax=function(m){
+  window.__dshMax=!!m;
   var box=document.getElementById(BOX);
   if(!box||!box.children[1]) return;
   var s=box.children[1].firstChild;
   if(s) drawMax(s,!!m);
  };
+ // 边缘拖拽缩放：WebView2 是子窗口（airspace 规则），盖住了 WinForms 的透明抓手，
+ // 边缘抓手收不到鼠标事件 —— 所以缩放热区改由网页判定：靠近窗口边缘按下时上报方向，
+ // 桌面壳转发 WM_NCLBUTTONDOWN 进入系统缩放循环；同时用 CSS 光标给出视觉反馈。
+ var EDGE=6;
+ var EDGE_CURSOR={left:'w-resize',right:'e-resize',top:'n-resize',bottom:'s-resize',
+  topleft:'nw-resize',topright:'ne-resize',bottomleft:'sw-resize',bottomright:'se-resize'};
+ function edgeAt(x,y){
+  var w=window.innerWidth,h=window.innerHeight;
+  var l=x<=EDGE,r=x>=w-EDGE,t=y<=EDGE,b=y>=h-EDGE;
+  if(t&&l) return 'topleft';
+  if(t&&r) return 'topright';
+  if(b&&l) return 'bottomleft';
+  if(b&&r) return 'bottomright';
+  if(t) return 'top';
+  if(b) return 'bottom';
+  if(l) return 'left';
+  if(r) return 'right';
+  return '';
+ }
+ document.addEventListener('mousemove',function(e){
+  var de=document.documentElement;
+  if(window.__dshMax){ if(de.style.cursor) de.style.cursor=''; return; }
+  var d=edgeAt(e.clientX,e.clientY);
+  var c=d?EDGE_CURSOR[d]:'';
+  if(de.style.cursor!==c) de.style.cursor=c;
+ },true);
+ // 必须先于下面的拖动监听注册，并用 stopImmediatePropagation 拦住拖动逻辑
+ document.addEventListener('mousedown',function(e){
+  if(e.button!==0||window.__dshMax) return;
+  if(e.target&&e.target.closest&&e.target.closest('#'+BOX)) return; // 窗口按钮优先
+  var d=edgeAt(e.clientX,e.clientY);
+  if(!d) return;
+  e.preventDefault();
+  e.stopImmediatePropagation();
+  if(document.documentElement.style.cursor) document.documentElement.style.cursor='';
+  post('dsh-resize:'+d);
+ },true);
  // 顶部 44px 内的空白处：按下拖动窗口（阻止网页选中文本），双击切换最大化。
  // 交互元素（按钮 / 链接 / 输入框…）不拦截，点击行为完全不受影响。
  document.addEventListener('mousedown',function(e){
@@ -728,9 +766,10 @@ namespace DeepSeekHarness
             ClientSize = new Size(1280, 820);
             MinimumSize = new Size(760, 560);
             StartPosition = FormStartPosition.CenterScreen;
-            // 无边框窗口自己画一圈 1px 描边：底色即边框色，子控件靠 Padding 内缩 1px
-            BackColor = UI.Border;
-            Padding = new Padding(1);
+            // 不再自绘 1px 矩形描边：高 DPI 下那条硬边会被放大成锯齿状的「齿轮轮廓」，
+            // 观感很差。改为不留边距（Padding=0），窗口轮廓交给系统投影体现。
+            BackColor = UI.WindowBg;
+            Padding = new Padding(0);
             // 无边框 + 自绘标题栏（系统标题栏无法与应用内容统一配色）
             FormBorderStyle = FormBorderStyle.None;
             AutoScaleMode = AutoScaleMode.Dpi;
@@ -805,9 +844,6 @@ namespace DeepSeekHarness
         protected override void OnResize(EventArgs e)
         {
             base.OnResize(e);
-            // 最大化时贴着屏幕边缘，再画 1px 描边就成了一条灰线，去掉
-            Padding want = WindowState == FormWindowState.Maximized ? new Padding(0) : new Padding(1);
-            if (!Padding.Equals(want)) Padding = want;
             LayoutChrome();
             LayoutGrips();
             SyncCaptionMaxState(); // 网页右上角窗口按钮的 最大化/还原图标 跟着切
@@ -1009,6 +1045,43 @@ namespace DeepSeekHarness
                 ReleaseCapture();
                 SendMessage(Handle, WM_NCLBUTTONDOWN, (IntPtr)HTCAPTION, IntPtr.Zero);
             }
+        }
+
+        // 网页上报的边缘方向 → Win32 命中测试码（WM_NCLBUTTONDOWN 用）
+        private static int HitTestFromEdge(string dir)
+        {
+            switch (dir)
+            {
+                case "left": return HTLEFT;
+                case "right": return HTRIGHT;
+                case "top": return HTTOP;
+                case "bottom": return HTBOTTOM;
+                case "topleft": return HTTOPLEFT;
+                case "topright": return HTTOPRIGHT;
+                case "bottomleft": return HTBOTTOMLEFT;
+                case "bottomright": return HTBOTTOMRIGHT;
+            }
+            return 0;
+        }
+
+        // 网页判定鼠标在窗口边缘按下 → 交给系统缩放循环（等价于拖拽系统边框）。
+        // 这样绕开了 WebView2 子窗口的 airspace 限制：WinForms 抓手控件盖不住它，
+        // 但网页自己能收到鼠标事件。
+        private void StartResizeFromWeb(int ht)
+        {
+            if (IsDisposed) return;
+            if (WindowState == FormWindowState.Maximized)
+            {
+                // 最大化时（贴屏幕边）不允许从边缘缩放；顶边拖动改为「还原并跟随」
+                if (ht == HTTOP || ht == HTTOPLEFT || ht == HTTOPRIGHT)
+                {
+                    ReleaseCapture();
+                    SendMessage(Handle, WM_NCLBUTTONDOWN, (IntPtr)HTCAPTION, IntPtr.Zero);
+                }
+                return;
+            }
+            ReleaseCapture();
+            SendMessage(Handle, WM_NCLBUTTONDOWN, (IntPtr)ht, IntPtr.Zero);
         }
 
         // 最大化状态变化时通知网页切换窗口按钮的 最大化/还原图标
@@ -1333,6 +1406,7 @@ namespace DeepSeekHarness
                 // startUrl 形如 http://127.0.0.1:3080/?token=xxx：
                 // 服务端校验 token 后写入会话 Cookie 并 303 跳转到干净的 /，之后一切正常。
                 view.Source = new Uri(startUrl);
+                if (string.IsNullOrEmpty(readyUrl)) readyUrl = startUrl;
 
                 // WebView 就绪，移除启动占位卡片
                 RemoveLoadingPlaceholder();
@@ -1384,6 +1458,13 @@ namespace DeepSeekHarness
             if (msg == "dsh-drag")
             {
                 if (!IsDisposed) BeginInvoke(new Action(BeginDragFromWeb));
+                return;
+            }
+            if (msg.IndexOf("dsh-resize:", StringComparison.Ordinal) == 0)
+            {
+                int ht = HitTestFromEdge(msg.Substring(11));
+                if (ht != 0 && !IsDisposed)
+                    BeginInvoke(new Action(delegate { StartResizeFromWeb(ht); }));
                 return;
             }
             if (msg == "dsh-dblmax" || msg == "dsh-max")
@@ -1582,6 +1663,10 @@ namespace DeepSeekHarness
             LaunchServerProcess();
         }
 
+        // 启动时打印的带 token 地址（形如 http://127.0.0.1:3080/?token=xxx）。
+        // 裸访问根路径会被 dsh web 拒绝，所以「在浏览器打开界面」也必须复用它。
+        private volatile string readyUrl;
+
         private void LaunchServerProcess()
         {
             ProcessStartInfo psi = new ProcessStartInfo();
@@ -1636,7 +1721,17 @@ namespace DeepSeekHarness
             int i = line.IndexOf("dsh web:", StringComparison.Ordinal);
             if (i < 0) return;
             Match m = Regex.Match(line, @"https?://\S+");
-            if (m.Success) readyUrlSource.TrySetResult(m.Value);
+            if (m.Success)
+            {
+                // 行尾可能跟着说明文字（如 (LAN: ...)），去掉尾部的标点/括号
+                char[] trim = new char[] { ')', ']', '}', ',', ';', '\'', '"', '，', '；', '）', '】' };
+                string url = m.Value.TrimEnd(trim);
+                if (!string.IsNullOrEmpty(url))
+                {
+                    readyUrl = url; // 每次打印都刷新（dsh 重启会换新 token）
+                    readyUrlSource.TrySetResult(url);
+                }
+            }
         }
 
         // 等待服务就绪：优先等带 token 的 URL 行；若端口已开但迟迟没有 URL 行
@@ -1977,7 +2072,11 @@ namespace DeepSeekHarness
 
         private void OpenLocalSite()
         {
-            try { Process.Start(new ProcessStartInfo("http://127.0.0.1:" + port) { UseShellExecute = true }); }
+            // 必须用启动时打印的带 token 地址：dsh web 的根路径裸访问会被拒
+            // （提示 dsh web authentication required），只有 token 链接能换取签名 Cookie。
+            string url = readyUrl;
+            if (string.IsNullOrEmpty(url)) url = "http://127.0.0.1:" + port + "/";
+            try { Process.Start(new ProcessStartInfo(url) { UseShellExecute = true }); }
             catch { }
         }
 
