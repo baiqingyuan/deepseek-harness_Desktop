@@ -144,17 +144,19 @@ namespace DeepSeekHarness
     internal static class UI
     {
         // 注意：这些配色是**可变**的 —— 网页会把当前主题背景色上报给桌面壳，
-        // 标题栏 / 描边 / 文字会跟着切换（深色界面配深色标题栏），见 ApplyChromeTheme。
-        public static Color WindowBg = Color.FromArgb(245, 246, 248);       // 窗口底色
-        public static Color Bar = Color.White;                              // 标题栏
-        public static Color Border = Color.FromArgb(222, 224, 229);         // 窗口 1px 描边（柔和）
-        public static Color Separator = Color.FromArgb(234, 236, 240);      // 标题栏底部分隔线
-        public static Color Hover = Color.FromArgb(240, 241, 245);          // 标题按钮悬停
-        public static Color Pressed = Color.FromArgb(226, 228, 234);        // 标题按钮按下
+        // 标题栏 / 描边 / 文字会跟着切换（见 ApplyChromeTheme）。
+        // 默认取深色：启动加载期（网页还没上报主题时）就与 dsh 深色主界面一致，
+        // 不再出现"白底加载页 → 深色主界面"的突兀跳变；浅色页面加载后由上报切回浅色。
+        public static Color WindowBg = Color.FromArgb(26, 27, 31);          // 窗口底色
+        public static Color Bar = Color.FromArgb(26, 27, 31);               // 标题栏
+        public static Color Border = Color.FromArgb(14, 15, 17);            // 窗口 1px 描边（柔和）
+        public static Color Separator = Color.FromArgb(54, 56, 61);         // 标题栏底部分隔线
+        public static Color Hover = Color.FromArgb(56, 58, 63);             // 标题按钮悬停
+        public static Color Pressed = Color.FromArgb(72, 74, 80);           // 标题按钮按下
         public static Color CloseHover = Color.FromArgb(232, 17, 35);       // 关闭按钮悬停
-        public static Color Label = Color.FromArgb(31, 35, 40);             // 主文字
-        public static Color LabelSecondary = Color.FromArgb(108, 114, 124); // 次级文字
-        public static Color Card = Color.White;
+        public static Color Label = Color.FromArgb(235, 235, 238);          // 主文字
+        public static Color LabelSecondary = Color.FromArgb(158, 162, 170); // 次级文字
+        public static Color Card = Color.FromArgb(41, 43, 48);
         public static readonly Color Accent = Color.FromArgb(77, 107, 254); // DeepSeek 蓝
         public const string FontName = "Segoe UI";                          // Win11 为 Segoe UI Variable
         public const int TitleBarHeight = 40;                               // 标题栏高度
@@ -402,6 +404,8 @@ namespace DeepSeekHarness
  }
  function tick(){
   lastRun=Date.now(); pending=false;
+  // 一体化标题栏的窗口按钮跟着网页布局重定位（侧边栏/标签页变化、窗口缩放等）
+  try{ if(window.__dshCaptionPlace) window.__dshCaptionPlace(); }catch(e){}
   var b=document.getElementById(BTN);
   if(!b){ style(); b=build(); }
   // 侧边栏不在（收起/隐藏）或官方原生更新入口存在：按钮一律隐藏
@@ -477,6 +481,39 @@ namespace DeepSeekHarness
   }
   return false;
  }
+ // dsh 网页头部右上角有它自己的控件（工作区选择、面板按钮等，且不认识 window.dshDesktop
+ // 桥接，不会给我们让位）。窗口按钮不能盖在它们上面 —— 每次定位时扫描顶部条最右侧的
+ // 控件，把窗口按钮放到它们左边；顶部右侧没有可交互元素时贴回右上角。
+ // 只查这一小组选择器（不是全树遍历），配合节流不会重蹈 v0.8.2 的重排风暴。
+ function topRightCluster(){
+  var cands=document.querySelectorAll(
+   'button,a,[role=button],[class*=button],[class*=Button],[class*=trigger],[class*=Trigger],[class*=icon],[class*=Icon]');
+  var box=document.getElementById(BOX);
+  var minL=-1;
+  var w=window.innerWidth;
+  for(var i=0;i<cands.length;i++){
+   var el=cands[i];
+   if(box && box.contains(el)) continue;
+   var r=el.getBoundingClientRect();
+   if(r.width<10||r.width>180||r.height<12||r.height>72) continue;
+   if(r.top>56||r.bottom<0) continue;
+   if(r.left<w*0.35) continue;
+   if(r.right<w-280) continue; // 只看最右 280px 内的顶部控件
+   if(minL<0||r.left<minL) minL=r.left;
+  }
+  return minL;
+ }
+ function place(){
+  var box=document.getElementById(BOX);
+  if(!box) return;
+  var cl=topRightCluster();
+  if(cl<0){ box.style.left='auto'; box.style.right='0px'; return; }
+  var x=Math.round(cl-box.offsetWidth-8);
+  if(x<0){ box.style.left='auto'; box.style.right='0px'; return; } // 极端窄窗放不下：贴角兜底
+  box.style.right='auto';
+  box.style.left=x+'px';
+ }
+ window.__dshCaptionPlace=place;
  function build(){
   var box=document.getElementById(BOX);
   if(box) return;
@@ -521,7 +558,7 @@ namespace DeepSeekHarness
   if(e.clientY>DRAG_H||interactive(e.target)) return;
   post('dsh-dblmax');
  },true);
- function boot(){ build(); post('dsh-chrome-ready'); }
+ function boot(){ build(); place(); post('dsh-chrome-ready'); }
  if(document.body) boot(); else document.addEventListener('DOMContentLoaded', boot);
 })();
 ";
@@ -1128,8 +1165,8 @@ namespace DeepSeekHarness
                 view.CoreWebView2.Settings.IsStatusBarEnabled = false;
                 // 禁止误操作（Ctrl+滚轮 / 捏合）改变缩放导致网页重新栅格化后发虚
                 view.CoreWebView2.Settings.IsZoomControlEnabled = false;
-                // 白色底色，避免加载期闪一下黑底
-                view.DefaultBackgroundColor = Color.White;
+                // 底色与主题一致（深色），避免加载期闪一下突兀的白底
+                view.DefaultBackgroundColor = UI.WindowBg;
                 view.CoreWebView2.NavigationCompleted += OnNavigationCompleted;
                 // startUrl 形如 http://127.0.0.1:3080/?token=xxx：
                 // 服务端校验 token 后写入会话 Cookie 并 303 跳转到干净的 /，之后一切正常。
