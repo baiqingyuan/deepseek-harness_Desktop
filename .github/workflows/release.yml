@@ -1,5 +1,13 @@
 ﻿name: Build and Release
 
+# 发布约定（默认：Release 页面 + 应用内更新 都要更新）
+#   - 推 v* tag（或手动触发且不填 asset_tag）→ 新建一个正式 Release 条目并标记为 Latest，
+#     同时上传 latest.json。客户端固定读 releases/latest/download/latest.json，
+#     因此 Release 条目与应用内更新是同一份产物，两条链路一起生效。
+#   - 只有在仓库根放 asset-tag.txt（内容形如 v0.8.0）或手动触发填 asset_tag 时，
+#     才退回「覆盖上传到已有 Release、不新建条目」的应用内静默推送模式。
+#     注意该模式下若已存在更新的 Release，/releases/latest 不会指向它，
+#     客户端将读不到更新 —— 校验步骤会对此告警，正常发版不要用它。
 on:
   push:
     tags: ["v*"]
@@ -10,7 +18,7 @@ on:
         required: true
         default: "1.0.0"
       asset_tag:
-        description: "应用内更新：把产物覆盖上传到这个已存在的 Release（如 v0.8.0），不新建发行版；留空则按 version 新建 Release"
+        description: "仅特殊场景使用：把产物覆盖上传到这个已存在的 Release（如 v0.8.0），不新建发行版。留空=新建 Release（推荐）"
         required: false
         default: ""
 
@@ -279,7 +287,68 @@ jobs:
         uses: softprops/action-gh-release@v2
         with:
           body: ${{ steps.notes.outputs.body }}
+          # 应用内更新读的是 releases/latest/download/latest.json：
+          # 必须显式把本次 Release 设为 Latest，否则客户端拿到的还是旧清单。
+          make_latest: true
           files: |
             dist/DeepSeekHarness-Desktop-*.zip
             dist/DeepSeekHarness-Setup-*.exe
             dist/latest.json
+
+      - name: Verify release entry + in-app update manifest
+        # 「构建成功」不等于「用户能收到更新」。这里把两条链路都验一遍：
+        #   1) Release 页面条目存在且资产齐全（zip / Setup / latest.json）；
+        #   2) latest.json 指向本次版本，且里面的安装包与便携包链接可下载。
+        # 任一条不满足直接让 job 失败 —— 防止再次出现「Release 建了但客户端看不到更新」
+        # 或「产物传到了别的 Release 上」这类静默问题。
+        shell: pwsh
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          REL_VERSION: ${{ steps.meta.outputs.version }}
+          ASSET_TAG: ${{ steps.meta.outputs.asset_tag }}
+        run: |
+          $ErrorActionPreference = 'Stop'
+          $v = $env:REL_VERSION
+          $repo = "${{ github.repository }}"
+          $tag = if ($env:ASSET_TAG) { $env:ASSET_TAG } else { "v$v" }
+
+          # 1) Release 条目与资产
+          $names = @(gh release view "$tag" --json assets --jq '.assets[].name')
+          foreach ($need in @("latest.json", "DeepSeekHarness-Setup-v$v-win-x64.exe", "DeepSeekHarness-Desktop-v$v-win-x64.zip")) {
+            if ($names -notcontains $need) { throw "Release $tag 缺少资产: $need（现有: $($names -join ', ')）" }
+          }
+          Write-Host "[ok] Release $tag 资产齐全"
+
+          # 2) 应用内更新清单：客户端固定读 releases/latest/download/latest.json，
+          #    所以默认模式校验它；覆盖上传模式（产物挂在旧 Release 上）则校验那个 Release 的清单。
+          if ($env:ASSET_TAG) {
+            $manifestUrl = "https://github.com/$repo/releases/download/$tag/latest.json"
+          } else {
+            $manifestUrl = "https://github.com/$repo/releases/latest/download/latest.json"
+          }
+          $manifest = $null
+          for ($i = 0; $i -lt 20; $i++) {
+            Start-Sleep -Seconds 6
+            try {
+              $j = (Invoke-WebRequest -Uri "$($manifestUrl)?nocache=$i" -UseBasicParsing).Content | ConvertFrom-Json
+              if ($j.version -eq $v) { $manifest = $j; break }
+              Write-Host "清单仍是 $($j.version)，等待刷新为 $v ..."
+            } catch { Write-Host "清单暂不可读：$($_.Exception.Message)" }
+          }
+          if (-not $manifest) { throw "应用内更新清单未指向 v$v —— 客户端看不到本次更新。URL: $manifestUrl" }
+          Write-Host "[ok] latest.json -> version $($manifest.version)"
+
+          # 3) 清单里的下载链接真的能下
+          foreach ($item in @($manifest.installer, $manifest.portable)) {
+            if (-not $item) { continue }
+            $code = (Invoke-WebRequest -Uri $item.url -Method Head -UseBasicParsing).StatusCode
+            Write-Host "[ok] 可下载 $($item.name) -> HTTP $code"
+          }
+
+          # 4) 覆盖上传模式额外提醒：/releases/latest 若不是目标 Release，客户端读的还是别的版本
+          if ($env:ASSET_TAG) {
+            $latestTag = (gh release view --json tagName --jq '.tagName')
+            if ($latestTag -ne $tag) {
+              Write-Host "::warning::当前 Latest 是 $latestTag，而产物上传到了 $tag；客户端读 /releases/latest 会拿到 $latestTag 的清单。"
+            }
+          }
