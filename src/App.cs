@@ -527,12 +527,37 @@ namespace DeepSeekHarness
    target.appendChild(sp);
   }
  }
+ // 碰撞兜底：占位元素只对 flex/grid 行内子项有效，dsh 头部还有个别绝对定位的控件
+ // （如右上角的 ✕）推不动，会盖到窗口按钮上。每轮定位后扫描与窗口按钮区域重叠的
+ // 网页控件，只把这几个「漏网」元素单独平移让开——影响面最小，不会动到其他布局。
+ function clearOverlap(){
+  var box=document.getElementById(BOX);
+  if(!box) return;
+  var br=box.getBoundingClientRect();
+  if(br.width===0) return;
+  var cands=document.querySelectorAll(
+   'button,a,[role=button],[class*=button],[class*=Button],[class*=trigger],[class*=Trigger],[class*=icon],[class*=Icon]');
+  for(var i=0;i<cands.length;i++){
+   var el=cands[i];
+   if(box.contains(el)) continue;
+   var r=el.getBoundingClientRect();
+   if(r.width<6||r.height<10) continue;
+   if(r.top>56||r.bottom<0) continue;
+   if(r.right>br.left+2&&r.left<br.right-2){ // 与窗口按钮区重叠
+    if(!el.__dshMoved){
+     el.__dshMoved=true;
+     el.style.transform='translateX(-'+Math.ceil(br.right-r.left+6)+'px)';
+    }
+   }
+  }
+ }
  function place(){
   var box=document.getElementById(BOX);
   if(!box) return;
   box.style.left='auto';
   box.style.right='0px';
   reserve();
+  clearOverlap();
  }
  window.__dshCaptionPlace=place;
  function build(){
@@ -945,7 +970,7 @@ namespace DeepSeekHarness
             };
             loadingText = new Label
             {
-                Text = "首次启动需要几十秒，请稍候",
+                Text = "正在启动，请稍候",
                 Font = UI.MakeFont(9f),
                 ForeColor = UI.LabelSecondary,
                 Left = 20, Top = 60, Width = 380, Height = 24,
