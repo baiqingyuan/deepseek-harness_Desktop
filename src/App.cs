@@ -242,8 +242,15 @@ namespace DeepSeekHarness
         private Label portBadge;
         private Panel loadingCard;
         private Label loadingText;
-        private ResizeGrip[] grips;
         private CaptionButton btnMin, btnMax, btnClose;
+        // 手动缩放状态（无边框窗口没有系统边框，缩放自己驱动，见 StartResizeFromWeb）
+        private bool resizing;
+        private bool resizeL, resizeR, resizeT, resizeB;
+        private Point resizeOrigin;
+        private Rectangle resizeBaseBounds;
+        private System.Windows.Forms.Timer resizeTimer;
+        // 上一次同步给网页的最大化状态：-1 未知（新文档需要强制同步一次）
+        private int maxStateSynced = -1;
         private Process serverProc;
         private bool ownsServer;
         private bool shuttingDown;
@@ -398,7 +405,15 @@ namespace DeepSeekHarness
  // 把页面背景色上报给桌面壳：标题栏/描边/文字跟着主题切换（深色界面配深色外框）
  function theme(){
   try{
-   var c=getComputedStyle(document.body).backgroundColor;
+   // body 常常是透明的（配色挂在上层容器上），直接取 body 会得到 rgba(0,0,0,0)，
+   // 桌面壳会误判成纯黑主题 → 启动加载页/兜底标题栏都变成黑色。这里沿祖先链
+   // 往上找第一个真正有颜色的背景。
+   var c='';
+   var reTrans=/transparent|rgba\(\s*0\s*,\s*0\s*,\s*0\s*,\s*0\s*\)/;
+   for(var el=document.body;el;el=el.parentElement){
+    var v=getComputedStyle(el).backgroundColor;
+    if(v&&!reTrans.test(v)){ c=v; break; }
+   }
    if(c && c!==lastTheme){
     lastTheme=c;
     try{ window.chrome.webview.postMessage('dsh-theme:'+c); }catch(e){}
@@ -684,14 +699,28 @@ namespace DeepSeekHarness
   var s=box.children[1].firstChild;
   if(s) drawMax(s,!!m);
  };
- // 边缘拖拽缩放：WebView2 是子窗口（airspace 规则），盖住了 WinForms 的透明抓手，
- // 边缘抓手收不到鼠标事件 —— 所以缩放热区改由网页判定：靠近窗口边缘按下时上报方向，
- // 桌面壳转发 WM_NCLBUTTONDOWN 进入系统缩放循环；同时用 CSS 光标给出视觉反馈。
+ // 边缘拖拽缩放：热区由网页判定，桌面壳自己按鼠标位移换算窗口边界。
+ // 光标必须用 !important 规则压住 —— 页面根容器自带的 cursor 会让挂在 <html> 上的
+ // 光标失效；另外左下/右下角用规范的 nesw-resize / nwse-resize，避免斜向箭头反向。
  var EDGE=6;
  var EDGE_CURSOR={left:'w-resize',right:'e-resize',top:'n-resize',bottom:'s-resize',
-  topleft:'nw-resize',topright:'ne-resize',bottomleft:'sw-resize',bottomright:'se-resize'};
+  topleft:'nwse-resize',topright:'nesw-resize',bottomleft:'nesw-resize',bottomright:'nwse-resize'};
+ var edgeSt=document.createElement('style');
+ edgeSt.id='dsh-edge-cursor-css';
+ edgeSt.textContent='html.dsh-edge,html.dsh-edge *{cursor:var(--dsh-edge-cursor,default)!important}';
+ function ensureEdgeCss(){
+  try{ if(!edgeSt.parentNode) (document.head||document.documentElement).appendChild(edgeSt); }catch(e){}
+ }
+ function setEdgeCursor(c){
+  var de=document.documentElement;
+  try{
+   if(c){ de.style.setProperty('--dsh-edge-cursor',c); de.classList.add('dsh-edge'); }
+   else if(de.classList.contains('dsh-edge')) de.classList.remove('dsh-edge');
+  }catch(e){ if(de.style) de.style.cursor=c||''; }
+ }
  function edgeAt(x,y){
-  var w=window.innerWidth,h=window.innerHeight;
+  var w=document.documentElement.clientWidth||window.innerWidth;
+  var h=document.documentElement.clientHeight||window.innerHeight;
   var l=x<=EDGE,r=x>=w-EDGE,t=y<=EDGE,b=y>=h-EDGE;
   if(t&&l) return 'topleft';
   if(t&&r) return 'topright';
@@ -703,22 +732,30 @@ namespace DeepSeekHarness
   if(r) return 'right';
   return '';
  }
+ ensureEdgeCss();
  document.addEventListener('mousemove',function(e){
-  var de=document.documentElement;
-  if(window.__dshMax){ if(de.style.cursor) de.style.cursor=''; return; }
+  ensureEdgeCss();
+  if(window.__dshMax||window.__dshResizing){ setEdgeCursor(''); return; }
   var d=edgeAt(e.clientX,e.clientY);
-  var c=d?EDGE_CURSOR[d]:'';
-  if(de.style.cursor!==c) de.style.cursor=c;
+  setEdgeCursor(d?EDGE_CURSOR[d]:'');
  },true);
- // 必须先于下面的拖动监听注册，并用 stopImmediatePropagation 拦住拖动逻辑
+ document.addEventListener('mouseleave',function(){ setEdgeCursor(''); },true);
+ document.addEventListener('mouseup',function(e){
+  window.__dshResizing=false;
+  if(window.__dshMax){ setEdgeCursor(''); return; }
+  var d=edgeAt(e.clientX,e.clientY);
+  setEdgeCursor(d?EDGE_CURSOR[d]:'');
+ },true);
+ // 必须先于下面的拖动监听注册，并用 stopImmediatePropagation 拦住拖动逻辑。
+ // 边缘优先于窗口按钮：最外侧那几像素交给缩放，符合系统窗口的习惯。
  document.addEventListener('mousedown',function(e){
   if(e.button!==0||window.__dshMax) return;
-  if(e.target&&e.target.closest&&e.target.closest('#'+BOX)) return; // 窗口按钮优先
   var d=edgeAt(e.clientX,e.clientY);
   if(!d) return;
   e.preventDefault();
   e.stopImmediatePropagation();
-  if(document.documentElement.style.cursor) document.documentElement.style.cursor='';
+  window.__dshResizing=true;
+  setEdgeCursor(EDGE_CURSOR[d]);
   post('dsh-resize:'+d);
  },true);
  // 顶部 44px 内的空白处：按下拖动窗口（阻止网页选中文本），双击切换最大化。
@@ -744,10 +781,7 @@ namespace DeepSeekHarness
 
         // ---- 无边框窗口自绘所需 ----
         private const int WM_NCLBUTTONDOWN = 0x00A1;
-        private const int WM_NCHITTEST = 0x0084;
         private const int HTCAPTION = 2;
-        private const int HTLEFT = 10, HTRIGHT = 11, HTTOP = 12, HTTOPLEFT = 13,
-                          HTTOPRIGHT = 14, HTBOTTOM = 15, HTBOTTOMLEFT = 16, HTBOTTOMRIGHT = 17;
 
         [System.Runtime.InteropServices.DllImport("user32.dll")]
         [return: System.Runtime.InteropServices.MarshalAs(System.Runtime.InteropServices.UnmanagedType.Bool)]
@@ -783,7 +817,6 @@ namespace DeepSeekHarness
             {
                 BuildTitleBar();
                 BuildLoadingPlaceholder();
-                BuildResizeGrips();
                 LayoutChrome();
             }
             catch (Exception ex)
@@ -803,7 +836,6 @@ namespace DeepSeekHarness
             try
             {
                 for (int i = Controls.Count - 1; i >= 0; i--) Controls.RemoveAt(i);
-                grips = null;
                 titleBar = null;
                 titleLabel = null;
                 portBadge = null;
@@ -845,54 +877,19 @@ namespace DeepSeekHarness
         {
             base.OnResize(e);
             LayoutChrome();
-            LayoutGrips();
             SyncCaptionMaxState(); // 网页右上角窗口按钮的 最大化/还原图标 跟着切
         }
 
-        // 无边框窗口没有系统边框，缩放热区需要自己做：
-        // 用 8 个贴边的透明抓手控件（4 边 + 4 角）投递 WM_NCLBUTTONDOWN。
-        // 之所以不用 WndProc 处理 WM_NCHITTEST：WebView2 覆盖了整个客户区，
-        // 鼠标落在子窗口上时该消息根本不会派发到窗体，命中测试拿不到。
-        private void BuildResizeGrips()
-        {
-            int[] hits = new int[]
-            { HTTOPLEFT, HTTOP, HTTOPRIGHT, HTRIGHT, HTBOTTOMRIGHT, HTBOTTOM, HTBOTTOMLEFT, HTLEFT };
-            grips = new ResizeGrip[hits.Length];
-            for (int i = 0; i < hits.Length; i++)
-            {
-                grips[i] = new ResizeGrip(this, hits[i]);
-                Controls.Add(grips[i]); // 最后添加 → 位于最上层
-            }
-            LayoutGrips();
-        }
-
-        private void LayoutGrips()
-        {
-            if (grips == null) return;
-            int g = 6;
-            int w = ClientSize.Width, h = ClientSize.Height;
-            // 角（12x12）
-            grips[0].Bounds = new Rectangle(0, 0, g * 2, g * 2);
-            grips[2].Bounds = new Rectangle(w - g * 2, 0, g * 2, g * 2);
-            grips[4].Bounds = new Rectangle(w - g * 2, h - g * 2, g * 2, g * 2);
-            grips[6].Bounds = new Rectangle(0, h - g * 2, g * 2, g * 2);
-            // 边
-            grips[1].Bounds = new Rectangle(g * 2, 0, Math.Max(0, w - g * 4), g);
-            grips[3].Bounds = new Rectangle(w - g, g * 2, g, Math.Max(0, h - g * 4));
-            grips[5].Bounds = new Rectangle(g * 2, h - g, Math.Max(0, w - g * 4), g);
-            grips[7].Bounds = new Rectangle(0, g * 2, g, Math.Max(0, h - g * 4));
-
-            bool show = WindowState != FormWindowState.Maximized;
-            for (int i = 0; i < grips.Length; i++) grips[i].Visible = show;
-        }
-
-        // WebView2 是运行时才加入的，加进来会盖住抓手，需要重新提到最上层
-        private void BringGripsToFront()
-        {
-            if (grips == null) return;
-            for (int i = 0; i < grips.Length; i++) grips[i].BringToFront();
-        }
-
+        // v0.9.0 起不再用贴边透明抓手做缩放。老方案的三个毛病（实测确认）：
+        //   1) 抓手"透明"其实是拿父窗口底色去填 —— 在深色配色下就是一整圈近黑硬边
+        //      （6px 直边 + 12px 角块，看起来正是"齿轮状/锯齿状轮廓"）；
+        //   2) 抓手在 z 序上压住 WebView2，边缘那 6px 的鼠标事件被它截走，
+        //      网页侧的边缘判定根本收不到 mousedown；
+        //   3) 抓手投递的 WM_NCLBUTTONDOWN(HT*) 没有 WS_THICKFRAME 的窗口会被
+        //      DefWindowProc 直接忽略，所以拖动始终没有反应；而它的 Cursor 映射又把
+        //      左下/右下角的双向箭头写反（16/17 号命中码），于是两个下角光标转了 90°。
+        // 现在统一改为「网页判定边缘 + 桌面壳自己按鼠标位移换算窗口边界」，
+        // 不用加 WS_THICKFRAME（加了系统会重新画出边框），也不会再有任何贴边控件。
         // 自绘标题栏：白底 + 底部 1px 分隔线；左侧图标与标题，右侧本地端口 + 三个标准标题按钮
         private void BuildTitleBar()
         {
@@ -1047,48 +1044,98 @@ namespace DeepSeekHarness
             }
         }
 
-        // 网页上报的边缘方向 → Win32 命中测试码（WM_NCLBUTTONDOWN 用）
-        private static int HitTestFromEdge(string dir)
-        {
-            switch (dir)
-            {
-                case "left": return HTLEFT;
-                case "right": return HTRIGHT;
-                case "top": return HTTOP;
-                case "bottom": return HTBOTTOM;
-                case "topleft": return HTTOPLEFT;
-                case "topright": return HTTOPRIGHT;
-                case "bottomleft": return HTBOTTOMLEFT;
-                case "bottomright": return HTBOTTOMRIGHT;
-            }
-            return 0;
-        }
-
-        // 网页判定鼠标在窗口边缘按下 → 交给系统缩放循环（等价于拖拽系统边框）。
-        // 这样绕开了 WebView2 子窗口的 airspace 限制：WinForms 抓手控件盖不住它，
-        // 但网页自己能收到鼠标事件。
-        private void StartResizeFromWeb(int ht)
+        // 网页判定鼠标在窗口边缘按下 → 开始手动缩放。
+        // 为什么不投递 WM_NCLBUTTONDOWN：DefWindowProc 只在窗口带 WS_THICKFRAME
+        // （可调整大小的边框样式）时才进入缩放模态循环，无边框窗口没有这个样式，
+        // HTLEFT / HTBOTTOMRIGHT 之类的缩放码会被直接丢掉 —— 这正是此前「拖边框
+        // 完全没反应」的根因；而把 WS_THICKFRAME 补回来，系统又会重新画出一圈边框，
+        // 正是要消掉的东西。所以缩放由桌面壳自己驱动：定时读鼠标屏幕坐标，
+        // 实时换算窗口边界。手感与系统拖拽一致，且不依赖任何窗口样式。
+        private void StartResizeFromWeb(string dir)
         {
             if (IsDisposed) return;
             if (WindowState == FormWindowState.Maximized)
             {
-                // 最大化时（贴屏幕边）不允许从边缘缩放；顶边拖动改为「还原并跟随」
-                if (ht == HTTOP || ht == HTTOPLEFT || ht == HTTOPRIGHT)
+                // 最大化时窗口贴着屏幕边，边缘不可拽；顶边按下改为「还原并跟随」（系统行为）
+                if (dir == "top" || dir == "topleft" || dir == "topright")
                 {
                     ReleaseCapture();
                     SendMessage(Handle, WM_NCLBUTTONDOWN, (IntPtr)HTCAPTION, IntPtr.Zero);
                 }
                 return;
             }
-            ReleaseCapture();
-            SendMessage(Handle, WM_NCLBUTTONDOWN, (IntPtr)ht, IntPtr.Zero);
+            resizeL = dir == "left" || dir == "topleft" || dir == "bottomleft";
+            resizeR = dir == "right" || dir == "topright" || dir == "bottomright";
+            resizeT = dir == "top" || dir == "topleft" || dir == "topright";
+            resizeB = dir == "bottom" || dir == "bottomleft" || dir == "bottomright";
+            if (!resizeL && !resizeR && !resizeT && !resizeB) return;
+
+            resizeOrigin = Cursor.Position;
+            resizeBaseBounds = Bounds;
+            resizing = true;
+            if (resizeTimer == null)
+            {
+                resizeTimer = new System.Windows.Forms.Timer();
+                resizeTimer.Interval = 12; // ≈80Hz，拖起来跟手
+                resizeTimer.Tick += ResizeTick;
+            }
+            resizeTimer.Start();
+        }
+
+        // 缩放轮询：按鼠标位移重算四条边（左/上边拖动时窗口原点跟着走）。
+        // 松开左键即结束 —— 不依赖网页是否还能收到 mouseup（鼠标可能已经拖到窗口外）。
+        private void ResizeTick(object sender, EventArgs e)
+        {
+            if (!resizing || IsDisposed) { EndResizeFromWeb(); return; }
+            if (!IsLeftMouseDown()) { EndResizeFromWeb(); return; }
+
+            Point cur = Cursor.Position;
+            int dx = cur.X - resizeOrigin.X, dy = cur.Y - resizeOrigin.Y;
+            int minW = MinimumSize.Width, minH = MinimumSize.Height;
+            int left = resizeBaseBounds.Left, top = resizeBaseBounds.Top;
+            int right = resizeBaseBounds.Right, bottom = resizeBaseBounds.Bottom;
+            if (resizeL) left = Math.Min(right - minW, left + dx);
+            if (resizeR) right = Math.Max(left + minW, right + dx);
+            if (resizeT) top = Math.Min(bottom - minH, top + dy);
+            if (resizeB) bottom = Math.Max(top + minH, bottom + dy);
+
+            Rectangle want = new Rectangle(left, top, right - left, bottom - top);
+            if (want != Bounds) SetBounds(want.X, want.Y, want.Width, want.Height);
+        }
+
+        // 左键是否仍按着：用 GetAsyncKeyState 读物理按键状态，不依赖窗口是否还在收鼠标消息
+        // （拖到窗口外时窗口收不到任何消息，靠窗口自己的 MouseButtons 判断会误判为已松开）
+        [System.Runtime.InteropServices.DllImport("user32.dll")]
+        private static extern short GetAsyncKeyState(int vKey);
+
+        private static bool IsLeftMouseDown()
+        {
+            return (GetAsyncKeyState(0x01) & 0x8000) != 0; // VK_LBUTTON
+        }
+
+        private void EndResizeFromWeb()
+        {
+            resizing = false;
+            if (resizeTimer != null) resizeTimer.Stop();
+            // 鼠标在窗口外松开时网页收不到 mouseup，这里主动清掉它的标记，
+            // 否则边缘热区会被一直挂起（光标停在缩放样式上）
+            try
+            {
+                if (webView != null && !webView.IsDisposed && webView.CoreWebView2 != null)
+                    webView.CoreWebView2.ExecuteScriptAsync("window.__dshResizing=false;");
+            }
+            catch { }
         }
 
         // 最大化状态变化时通知网页切换窗口按钮的 最大化/还原图标
         private void SyncCaptionMaxState()
         {
             if (webView == null || webView.CoreWebView2 == null || IsDisposed) return;
-            string maxed = WindowState == FormWindowState.Maximized ? "true" : "false";
+            int st = WindowState == FormWindowState.Maximized ? 1 : 0;
+            // 拖边框缩放时每帧都会走到这里，状态没变就不用再往网页里灌脚本
+            if (st == maxStateSynced) return;
+            maxStateSynced = st;
+            string maxed = st == 1 ? "true" : "false";
             try
             {
                 webView.CoreWebView2.ExecuteScriptAsync(
@@ -1411,7 +1458,6 @@ namespace DeepSeekHarness
                 // WebView 就绪，移除启动占位卡片
                 RemoveLoadingPlaceholder();
                 webView = view;
-                BringGripsToFront(); // WebView 后加入会盖住边缘抓手，重新提到最上层
                 // 当前状态立刻同步一次：若启动时已静默查到新版本，按钮一出现就是「新版本」
                 PublishUpdateState(updatePhase, updatePercent, pendingUpdate == null ? "" : pendingUpdate.Version, true);
             }
@@ -1452,7 +1498,12 @@ namespace DeepSeekHarness
             {
                 // 注入完成即同步一次最大化状态：否则刚加载完网页按钮默认画成
                 // 还原图标，窗口实际最大化时右数第二个按钮就不是方形最大化样式
-                if (!IsDisposed) BeginInvoke(new Action(() => { HideFallbackTitleBar(); SyncCaptionMaxState(); }));
+                if (!IsDisposed) BeginInvoke(new Action(() =>
+                {
+                    maxStateSynced = -1; // 新文档，强制同步一次
+                    HideFallbackTitleBar();
+                    SyncCaptionMaxState();
+                }));
                 return;
             }
             if (msg == "dsh-drag")
@@ -1462,9 +1513,8 @@ namespace DeepSeekHarness
             }
             if (msg.IndexOf("dsh-resize:", StringComparison.Ordinal) == 0)
             {
-                int ht = HitTestFromEdge(msg.Substring(11));
-                if (ht != 0 && !IsDisposed)
-                    BeginInvoke(new Action(delegate { StartResizeFromWeb(ht); }));
+                string dir = msg.Substring(11);
+                if (!IsDisposed) BeginInvoke(new Action(delegate { StartResizeFromWeb(dir); }));
                 return;
             }
             if (msg == "dsh-dblmax" || msg == "dsh-max")
@@ -1560,7 +1610,9 @@ namespace DeepSeekHarness
             }
             try
             {
-                BackColor = UI.Border; // 1px 描边 = 窗体底色
+                // 底色用窗口底色而非"描边色"：v0.8.20 去掉了 1px 描边，若这里仍把
+                // BackColor 设成偏暗的近黑色，边缘任何 1px 缝隙都会露出一条硬边
+                BackColor = UI.WindowBg;
                 if (titleBar != null && !titleBar.IsDisposed)
                 {
                     titleBar.BackColor = UI.Bar;
@@ -2681,49 +2733,10 @@ namespace DeepSeekHarness
         }
     }
 
-    // 无边框窗口的边缘/角落缩放抓手：透明控件，按下时向所属窗体投递系统缩放命令
-    internal sealed class ResizeGrip : Control
-    {
-        private readonly Form owner;
-        private readonly int hitTest;
-        private const int WM_NCLBUTTONDOWN = 0x00A1;
-
-        public ResizeGrip(Form owner, int hitTest)
-        {
-            this.owner = owner;
-            this.hitTest = hitTest;
-            // 同上：先 SetStyle 再设 Transparent，顺序颠倒会抛 ArgumentException
-            SetStyle(ControlStyles.UserPaint | ControlStyles.AllPaintingInWmPaint |
-                     ControlStyles.OptimizedDoubleBuffer | ControlStyles.SupportsTransparentBackColor, true);
-            BackColor = Color.Transparent;
-            Cursor = CursorFor(hitTest);
-        }
-
-        private static Cursor CursorFor(int hit)
-        {
-            if (hit == 12 || hit == 15) return Cursors.SizeNS;          // HTTOP / HTBOTTOM
-            if (hit == 10 || hit == 11) return Cursors.SizeWE;          // HTLEFT / HTRIGHT
-            if (hit == 13 || hit == 16) return Cursors.SizeNWSE;        // HTTOPLEFT / HTBOTTOMRIGHT
-            return Cursors.SizeNESW;                                    // HTTOPRIGHT / HTBOTTOMLEFT
-        }
-
-        protected override void OnMouseDown(MouseEventArgs e)
-        {
-            if (e.Button == MouseButtons.Left)
-            {
-                ReleaseCapture();
-                SendMessage(owner.Handle, WM_NCLBUTTONDOWN, (IntPtr)hitTest, IntPtr.Zero);
-            }
-            base.OnMouseDown(e);
-        }
-
-        [System.Runtime.InteropServices.DllImport("user32.dll")]
-        [return: System.Runtime.InteropServices.MarshalAs(System.Runtime.InteropServices.UnmanagedType.Bool)]
-        private static extern bool ReleaseCapture();
-
-        [System.Runtime.InteropServices.DllImport("user32.dll")]
-        private static extern IntPtr SendMessage(IntPtr hWnd, int msg, IntPtr wParam, IntPtr lParam);
-    }
+    // v0.9.0 起不再有 ResizeGrip：贴边透明抓手既是那圈"锯齿/齿轮状黑边"的来源
+    // （透明 = 父窗口底色），又会截走边缘 6px 的鼠标事件、把下两个角的光标写反，
+    // 而且它投递的 WM_NCLBUTTONDOWN 在没有 WS_THICKFRAME 的窗口上不起作用。
+    // 缩放改由网页判边缘 + 桌面壳按鼠标位移换算边界（见 StartResizeFromWeb）。
 
     // 自绘标题栏按钮（Windows 11 观感）：常态无底色，悬停浅灰底，关闭键悬停红底白叉。
     // 图标全部用 GDI 画线，不依赖 Segoe MDL2 Assets 等可能缺失的符号字体。

@@ -2,6 +2,17 @@
 
 本项目所有重要改动记录于此。格式参考 [Keep a Changelog](https://keepachangelog.com/)，版本号遵循 [语义化版本](https://semver.org/lang/zh-CN/)。
 
+## [0.9.0] - 2026-09-19
+
+### Fixed
+- **拖动边框/四角仍无法缩放**：根因是 `WM_NCLBUTTONDOWN` 的 `HTLEFT` / `HTBOTTOMRIGHT` 这类缩放命中码，只有在窗口带 `WS_THICKFRAME`（可调整大小的边框样式）时才会被 `DefWindowProc` 进入缩放模态循环；无边框窗口没有这个样式，消息被直接丢弃。补回 `WS_THICKFRAME` 又会让系统重新画出一圈边框，所以缩放改由桌面壳自己驱动：网页判定边缘按下后，壳定时读取鼠标屏幕坐标实时换算窗口边界，手感与系统拖拽一致，且不依赖任何窗口样式。
+- **下面两个角的双向箭头转了 90°**：`ResizeGrip.CursorFor` 把命中码 16（HTBOTTOMLEFT）和 17（HTBOTTOMRIGHT）当成了对角的两个角，左下角画成了 `\`、右下角画成了 `/`。同时把网页侧的光标改成规范的 `nesw-resize` / `nwse-resize`，并用一条 `!important` 规则压住页面自身样式（根容器自带的 cursor 会让挂在 `<html>` 上的光标失效）。
+- **周围一圈锯齿/齿轮状硬边**：真身是那 8 个贴边的透明抓手控件 —— `Color.Transparent` 实际是用父窗口底色去填，深色配色下就是一整圈近黑硬边（6px 直边 + 12px 角块，看起来正是"齿轮轮廓"）。v0.9.0 把抓手整体删除，窗口边缘只留网页内容；顺带把窗体底色改回窗口底色（不再用"描边色"），边缘任何缝隙都不会再露出暗色硬边。
+
+### Changed
+- 删掉 `ResizeGrip` 类与 `BuildResizeGrips` / `LayoutGrips` / `BringGripsToFront`，窗口不再有任何贴边控件（它们还会截走边缘 6px 的鼠标事件）。
+- 缩放过程中不再每帧向网页灌脚本：最大化状态未变化就跳过（拖边框时帧率更稳）。
+
 ## [0.8.20] - 2026-09-19
 
 ### Fixed
