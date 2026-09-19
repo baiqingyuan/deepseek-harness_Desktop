@@ -78,6 +78,7 @@ jobs:
           Write-Host "version=$v  asset_tag=$target"
 
       - name: Build
+        id: build
         shell: pwsh
         run: |
           # 把完整输出留一份到 build.log：CI 日志需要管理员权限才能下载，
@@ -298,26 +299,33 @@ jobs:
       - name: Verify release entry + in-app update manifest
         # 「构建成功」不等于「用户能收到更新」。这里把两条链路都验一遍：
         #   1) Release 页面条目存在且资产齐全（zip / Setup / latest.json）；
-        #   2) latest.json 指向本次版本，且里面的安装包与便携包链接可下载。
-        # 任一条不满足直接让 job 失败 —— 防止再次出现「Release 建了但客户端看不到更新」
-        # 或「产物传到了别的 Release 上」这类静默问题。
+        #   2) 更新清单指向本次版本；
+        #   3) 清单里的安装包与便携包链接可下载（Range 请求，只取 2 字节）。
+        #   1、2 任一不满足即构建失败；3 只告警 —— 它是网络探测，不该因为 CDN 抖动
+        #   把一次其实成功的发布判死。
+        # 每一步的结果都写进 verify.log，失败时由末尾步骤发成 issue（CI 日志无权限下载）。
         shell: pwsh
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
           REL_VERSION: ${{ steps.meta.outputs.version }}
           ASSET_TAG: ${{ steps.meta.outputs.asset_tag }}
         run: |
-          $ErrorActionPreference = 'Stop'
           $v = $env:REL_VERSION
           $repo = "${{ github.repository }}"
           $tag = if ($env:ASSET_TAG) { $env:ASSET_TAG } else { "v$v" }
+          $log = New-Object System.Collections.ArrayList
+          function Say($m) { Write-Host $m; [void]$log.Add($m) }
+          $fatal = @()
 
           # 1) Release 条目与资产
-          $names = @(gh release view "$tag" --json assets --jq '.assets[].name')
-          foreach ($need in @("latest.json", "DeepSeekHarness-Setup-v$v-win-x64.exe", "DeepSeekHarness-Desktop-v$v-win-x64.zip")) {
-            if ($names -notcontains $need) { throw "Release $tag 缺少资产: $need（现有: $($names -join ', ')）" }
-          }
-          Write-Host "[ok] Release $tag 资产齐全"
+          try {
+            $names = @(gh release view "$tag" --json assets --jq '.assets[].name')
+            Say "Release $tag 现有资产: $($names -join ', ')"
+            foreach ($need in @("latest.json", "DeepSeekHarness-Setup-v$v-win-x64.exe", "DeepSeekHarness-Desktop-v$v-win-x64.zip")) {
+              if ($names -notcontains $need) { $fatal += "缺少资产: $need" }
+            }
+            if (-not $fatal) { Say "[ok] 1) Release 条目与资产齐全" }
+          } catch { $fatal += "无法读取 Release $tag : $($_.Exception.Message)" }
 
           # 2) 应用内更新清单：客户端固定读 releases/latest/download/latest.json，
           #    所以默认模式校验它；覆盖上传模式（产物挂在旧 Release 上）则校验那个 Release 的清单。
@@ -327,28 +335,78 @@ jobs:
             $manifestUrl = "https://github.com/$repo/releases/latest/download/latest.json"
           }
           $manifest = $null
-          for ($i = 0; $i -lt 20; $i++) {
+          $lastErr = ""
+          for ($i = 0; $i -lt 30; $i++) {
             Start-Sleep -Seconds 6
             try {
-              $j = (Invoke-WebRequest -Uri "$($manifestUrl)?nocache=$i" -UseBasicParsing).Content | ConvertFrom-Json
-              if ($j.version -eq $v) { $manifest = $j; break }
-              Write-Host "清单仍是 $($j.version)，等待刷新为 $v ..."
-            } catch { Write-Host "清单暂不可读：$($_.Exception.Message)" }
+              $req = [System.Net.HttpWebRequest]::Create("$($manifestUrl)?nocache=$i")
+              $req.Method = 'GET'
+              $req.UserAgent = 'DeepSeekHarness-CI'
+              $req.Headers['Cache-Control'] = 'no-cache'
+              $resp = $req.GetResponse()
+              $body = (New-Object System.IO.StreamReader($resp.GetResponseStream())).ReadToEnd()
+              $resp.Close()
+              $j = $body | ConvertFrom-Json
+              if ($j.version -eq $v) { $manifest = $j; Say "[ok] 2) 清单已刷新为 $($j.version)（第 $i 次检查）"; break }
+              Say "清单仍是 $($j.version)，等待刷新为 $v ... ($i)"
+            } catch { $lastErr = $_.Exception.Message; Say "清单暂不可读: $lastErr ($i)" }
           }
-          if (-not $manifest) { throw "应用内更新清单未指向 v$v —— 客户端看不到本次更新。URL: $manifestUrl" }
-          Write-Host "[ok] latest.json -> version $($manifest.version)"
+          if (-not $manifest) { $fatal += "清单未指向 v$v（最后一次错误: $lastErr）。URL: $manifestUrl" }
 
-          # 3) 清单里的下载链接真的能下
-          foreach ($item in @($manifest.installer, $manifest.portable)) {
-            if (-not $item) { continue }
-            $code = (Invoke-WebRequest -Uri $item.url -Method Head -UseBasicParsing).StatusCode
-            Write-Host "[ok] 可下载 $($item.name) -> HTTP $code"
-          }
-
-          # 4) 覆盖上传模式额外提醒：/releases/latest 若不是目标 Release，客户端读的还是别的版本
-          if ($env:ASSET_TAG) {
-            $latestTag = (gh release view --json tagName --jq '.tagName')
-            if ($latestTag -ne $tag) {
-              Write-Host "::warning::当前 Latest 是 $latestTag，而产物上传到了 $tag；客户端读 /releases/latest 会拿到 $latestTag 的清单。"
+          # 3) 下载链接可达性（只告警）
+          if ($manifest) {
+            foreach ($item in @($manifest.installer, $manifest.portable)) {
+              if (-not $item) { continue }
+              try {
+                # 用 Range 只取前 2 字节：HEAD 在 release 下载域名上常被拒/超时
+                $r = [System.Net.HttpWebRequest]::Create($item.url)
+                $r.Method = 'GET'
+                $r.AddRange(0, 1)
+                $rs = $r.GetResponse()
+                $code = [int]$rs.StatusCode
+                $rs.Close()
+                Say "[ok] 3) 可下载 $($item.name) -> HTTP $code"
+              } catch {
+                Say "::warning::链接探测失败（不阻断） $($item.name): $($_.Exception.Message)"
+              }
             }
           }
+
+          # 4) 覆盖上传模式：/releases/latest 若不是目标 Release，客户端读的还是别的版本
+          if ($env:ASSET_TAG) {
+            try {
+              $latestTag = (gh release view --json tagName --jq '.tagName')
+              if ($latestTag -ne $tag) {
+                Say "::warning::当前 Latest 是 $latestTag，产物在 $tag；客户端读 /releases/latest 拿到的是 $latestTag 的清单。"
+              }
+            } catch { Say "::warning::无法确认 Latest: $($_.Exception.Message)" }
+          }
+
+          Set-Content -LiteralPath verify.log -Value $log -Encoding UTF8
+          if ($fatal.Count -gt 0) {
+            $msg = "发布校验失败：`n - " + ($fatal -join "`n - ")
+            Say $msg
+            throw $msg
+          }
+          Say "全部校验通过：Release 条目 + 应用内更新清单均指向 v$v"
+
+      - name: Report release verification failure
+        # 构建本身通过、但后续步骤（发布 / 校验）失败时，把诊断日志发成公开 issue。
+        # CI 日志需要管理员权限才能下载，没有 token 时这是唯一能看到错误的方式。
+        if: failure() && steps.build.outcome == 'success'
+        shell: pwsh
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          $parts = @()
+          if (Test-Path verify.log) {
+            $parts += "=== verify.log ==="
+            $parts += (Get-Content -LiteralPath verify.log -Raw)
+          }
+          $parts += "`n=== build.log 末尾 60 行 ==="
+          if (Test-Path build.log) { $parts += ((Get-Content -LiteralPath build.log -Tail 60) -join "`n") }
+          else { $parts += "(无 build.log)" }
+          $text = $parts -join "`n"
+          if ($text.Length -gt 60000) { $text = $text.Substring($text.Length - 60000) }
+          Set-Content -LiteralPath issue-body.md -Value $text -Encoding UTF8
+          gh issue create --title "CI 构建失败 v${{ steps.meta.outputs.version }}（发布/校验阶段）" --body-file issue-body.md
