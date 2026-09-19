@@ -513,8 +513,10 @@ namespace DeepSeekHarness
   }
   overlapMoved.length=0;
  }
- // 命中元素 → 控件整体单元：向上找紧贴的容器（宽高差 < 16px、不是整行、不套住别的命中
- // 控件），这样「图标 + 圆角外框 + 下拉箭头」作为整体一起移动，不会留下空方框。
+ // 命中元素 → 控件整体单元：向上找紧贴的容器，这样「图标 + 圆角外框 + 下拉箭头」作为
+ // 整体一起移动，不会留下空方框。放宽到 200px / 高 +28px，是因为拆分按钮（图标 + 下拉
+ // 箭头）比内部按钮宽得多，太严的紧贴条件爬不到它的外框容器。被套住的其它命中控件由
+ // 后面的「去内层」步骤合并 —— 内层单独的下移会被丢弃，不会再叠加位移。
  function unitOf(el,hits){
   var best=el, cur=el;
   for(var g=0;g<6;g++){
@@ -522,15 +524,24 @@ namespace DeepSeekHarness
    if(!p||p===document.body||p===document.documentElement) break;
    var pr=p.getBoundingClientRect();
    var cr=cur.getBoundingClientRect();
-   if(pr.width>window.innerWidth*0.6) break;
    if(pr.width<8||pr.height<8) break;
-   if(Math.abs(pr.width-cr.width)>=16||Math.abs(pr.height-cr.height)>=16) break;
-   var holds=false;
-   for(var i=0;i<hits.length;i++){ if(hits[i]!==cur&&p.contains(hits[i])){ holds=true; break; } }
-   if(holds) break;
+   if(pr.width>200||pr.width>window.innerWidth*0.6) break; // 到整行/大容器就停
+   if(pr.height>cr.height+28) break;
+   if(pr.width>Math.max(cr.width*3,cr.width+90)) break;
    best=p; cur=p;
   }
   return best;
+ }
+ // 所有命中控件的最近共同祖先：右上角这一组控件通常有一个共同容器（含外框、图标、
+ // 下拉箭头），整体下移它最干净 —— 组内一切（包括不属于命中的外框）都跟着走，绝不残留。
+ function commonAncestor(list){
+  if(!list||!list.length) return null;
+  var a=list[0];
+  for(var i=1;i<list.length;i++){
+   while(a&&!a.contains(list[i])) a=a.parentElement;
+   if(!a) return null;
+  }
+  return a;
  }
  function lift(el){
   if(getComputedStyle(el).position==='static') el.style.position='relative';
@@ -580,6 +591,22 @@ namespace DeepSeekHarness
     }
    }
    if(!skip) outer.push(units[c1]);
+  }
+  // 优先「整组下移」：所有命中控件的共同容器（右上角这一组通常有共同 wrapper），
+  // 一次位移把组内全部元素带走 —— 包括不属于命中的外框、分隔线、下拉箭头，
+  // 不会再有残留空方框。容器太宽（整行）或太高时退回下面的逐行下移。
+  var grp=commonAncestor(outer);
+  if(grp&&grp!==document.body&&grp!==document.documentElement){
+   var gr=grp.getBoundingClientRect();
+   if(gr.width>8&&gr.height>8&&gr.height<=220&&gr.width<=window.innerWidth*0.6){
+    var gt=Math.ceil(Math.ceil(br.bottom+8)-gr.top);
+    if(gt>0){
+     overlapMoved.push({el:grp,z:grp.style.zIndex||'',pos:grp.style.position||''});
+     lift(grp);
+     grp.style.transform='translateY('+gt+'px)';
+     return;
+    }
+   }
   }
   // 按原始 top 分行（容忍 8px 误差），行内 x 不动，行间自上而下依次堆叠下移
   var rows=[];
