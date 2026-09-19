@@ -324,11 +324,15 @@ namespace DeepSeekHarness
  if (window.__dshUpdateReady) return;
  if (window.top !== window) return;
  window.__dshUpdateReady = true;
- // v0.9.2 起更新入口分两处（都挂在 document.body 上，不塞进 React 管理的容器，
- // 避免 React 重渲染把它删掉、我们再加回来形成插入风暴把页面卡死）：
- //   1) 设置面板里加一行「检查更新」——手动入口，顺便显示当前版本/最新状态；
- //   2) 侧边栏设置按钮上方的蓝色小胶囊——只在**有新版本**时出现，鼠标移上去展开
- //      显示「更新」，点一下开始下载，按钮上直接显示下载进度。
+ // 更新入口分两处：
+ //   1) 「检查更新」= 设置面板里**真正的一个设置项**，不是浮在面板上的独立一层。
+ //      做法：克隆一条原生设置行当骨架（字体 / 内边距 / 分隔线 / 悬停样式全都白拿），
+ //      清空它的内容后填进我们自己的标题 + 状态说明，再插到那条原生行的**后面**，
+ //      成为列表里的兄弟节点 —— 位置完全交给浏览器排版，不可能再错位。
+ //      （v0.9.2 用的是 fixed 绝对定位去「吸附」面板底部，面板一识别错整行就半截露在
+ //      面板外面、跟设置界面互相盖章，用户看到的就是「多出来一层」。）
+ //   2) 侧边栏设置按钮上方的蓝色小胶囊：只在**有新版本**时出现，鼠标移上去展开显示
+ //      「更新」，点一下开始下载，按钮上直接显示下载进度。
  var ROW='dsh-desktop-update-row';
  var PILL='dsh-desktop-update-pill';
  var listeners=[];
@@ -341,6 +345,14 @@ namespace DeepSeekHarness
  var gearAt=0;
  var lastPlace=0;
  var lastPhase='';
+ var panelRef=null;
+ var rowBox=null;
+ var rowIcon=null;
+ var rowIconKind='';
+ var rowTitle=null;
+ var rowDesc=null;
+ var rowRight=null;
+ var lastInsert=0;
  // 图标用 DOM 现画（不用 innerHTML 拼 SVG：SVG 属性必须带引号，而这段脚本是
  // 嵌在 C# 逐字字符串里的，引号越少越不容易出岔子）
  var SVGNS='http://www.w3.org/2000/svg';
@@ -385,15 +397,29 @@ namespace DeepSeekHarness
   if(s.phase==='error') return '重试下载';
   return '更新';
  }
- function rowText(s){
-  if(s.phase==='checking') return '检查中…';
-  if(s.phase==='downloading') return '下载中 '+(s.percent||0)+'%';
-  if(s.phase==='available') return s.version?('发现 v'+s.version):'发现新版本';
-  if(s.phase==='ready') return '待安装 v'+(s.version||'');
-  if(s.phase==='installing') return '正在安装…';
-  if(s.phase==='uptodate') return '已是最新';
+ // 设置项第二行（对应原生行「字号大小 / 仅影响会话内容的字号」那种副标题）
+ function rowDescText(s){
+  if(s.phase==='checking') return '正在检查…';
+  if(s.phase==='downloading') return '正在下载 '+(s.percent||0)+'%';
+  if(s.phase==='available') return s.version?('发现 v'+s.version+'，点击更新'):'发现新版本，点击更新';
+  if(s.phase==='ready') return '已下载，点击安装并重启';
+  if(s.phase==='installing') return '正在安装，完成后自动重启';
+  if(s.phase==='uptodate') return appVersion?('当前 v'+appVersion+'，已是最新'):'已是最新版本';
   if(s.phase==='error') return s.version?'下载失败，点击重试':'检查失败，点击重试';
-  return appVersion?('当前 v'+appVersion):'';
+  return appVersion?('当前 v'+appVersion+'，点击检查'):'点击检查是否有新版本';
+ }
+ // 设置项右侧的短状态（原生行右侧是控件，我们这里是文字）
+ function rowRightText(s){
+  if(s.phase==='downloading') return (s.percent||0)+'%';
+  if(s.phase==='available') return '更新';
+  if(s.phase==='ready') return '安装';
+  if(s.phase==='error') return '重试';
+  if(s.phase==='checking') return '…';
+  return '';
+ }
+ function setRowTitle(s){
+  var hot=s.phase==='available'||s.phase==='ready'||s.phase==='installing';
+  return hot?'更新 DeepSeek Harness':'检查更新';
  }
  function send(){ try{ window.chrome.webview.postMessage('dsh-update-open'); }catch(e){} }
  function style(){
@@ -401,37 +427,33 @@ namespace DeepSeekHarness
   var st=document.createElement('style');
   st.id='dsh-desktop-update-css';
   st.textContent=
-   '#'+ROW+'{position:fixed;z-index:2147483000;display:none;box-sizing:border-box;align-items:center;justify-content:space-between;gap:10px;height:40px;padding:0 12px;border:0;border-radius:8px;background:transparent;color:inherit;font-family:inherit;font-size:13px;line-height:1;text-align:left;cursor:pointer;overflow:hidden;}'
-   +'#'+ROW+':hover{background:rgba(128,128,128,0.14);}'
+   // 「检查更新」行：骨架元素带原生类名（原生内边距/字体/分隔线自动继承），
+   // 这里只补我们自己的内部排版，全部走 id 选择器，优先级高于原生类名。
+   '#'+ROW+'{cursor:pointer;overflow:hidden;}'
+   +'#'+ROW+':hover{background:rgba(128,128,128,0.10);}'
    +'#'+ROW+'[data-busy]{cursor:progress;}'
-   +'#'+ROW+' .dsh-upd-l{display:inline-flex;align-items:center;gap:8px;white-space:nowrap;}'
+   +'#'+ROW+' .dsh-upd-l{display:flex;align-items:center;gap:10px;min-width:0;}'
    +'#'+ROW+' .dsh-upd-ic{display:inline-flex;align-items:center;justify-content:center;width:16px;height:16px;flex:0 0 auto;opacity:.75;}'
-   +'#'+ROW+' .dsh-upd-r{font-size:12px;opacity:.6;white-space:nowrap;overflow:hidden;text-overflow:ellipsis;}'
-   +'#'+ROW+'[data-error] .dsh-upd-r{color:#E81123;opacity:1;}'
-   +'#'+PILL+'{position:fixed;z-index:2147483001;display:none;box-sizing:border-box;align-items:center;gap:6px;height:32px;padding:0 9px;max-width:34px;overflow:hidden;white-space:nowrap;border:0;border-radius:9px;background:#2F6FEB;color:#fff;font-family:inherit;font-size:12px;line-height:1;cursor:pointer;box-shadow:0 4px 14px rgba(47,111,235,.35);transition:max-width .18s ease,padding .18s ease,background .12s ease;}'
-   +'#'+PILL+':hover{max-width:130px;background:#3B7BF5;}'
-   +'#'+PILL+'[data-wide]{max-width:170px;}'
+   +'#'+ROW+' .dsh-upd-tx{display:flex;flex-direction:column;gap:2px;min-width:0;}'
+   +'#'+ROW+' .dsh-upd-t{white-space:nowrap;overflow:hidden;text-overflow:ellipsis;}'
+   +'#'+ROW+' .dsh-upd-d{font-size:12px;opacity:.62;white-space:nowrap;overflow:hidden;text-overflow:ellipsis;}'
+   +'#'+ROW+'[data-error] .dsh-upd-d{color:#E81123;opacity:1;}'
+   +'#'+ROW+' .dsh-upd-r{flex:0 0 auto;display:flex;align-items:center;gap:6px;font-size:12px;opacity:.7;white-space:nowrap;}'
+   // 蓝色胶囊：收起时**只留图标**。v0.9.2 是靠 max-width 裁剪「藏」文字，
+   // 但 flex 的 gap + 文字最小宽度会让「更」的左边缘漏在裁剪线里（截图里那一小条）。
+   // 现在直接给文字 max-width:0/opacity:0 —— 收起时就真的没有文字占位。
+   +'#'+PILL+'{position:fixed;z-index:2147483001;display:none;box-sizing:border-box;align-items:center;justify-content:center;gap:0;height:32px;padding:0 9px;max-width:34px;overflow:hidden;white-space:nowrap;border:0;border-radius:9px;background:#2F6FEB;color:#fff;font-family:inherit;font-size:12px;line-height:1;cursor:pointer;box-shadow:0 4px 14px rgba(47,111,235,.35);transition:max-width .18s ease,background .12s ease;}'
+   +'#'+PILL+':hover{max-width:132px;background:#3B7BF5;}'
+   +'#'+PILL+'[data-wide]{max-width:176px;}'
    +'#'+PILL+'[data-busy]{cursor:progress;}'
    +'#'+PILL+' .dsh-upd-ic{display:inline-flex;align-items:center;justify-content:center;width:16px;height:16px;flex:0 0 auto;}'
-   +'#'+PILL+' .dsh-upd-lb{flex:1 1 auto;padding-right:2px;}'
+   +'#'+PILL+' .dsh-upd-lb{flex:0 0 auto;display:inline-block;max-width:0;opacity:0;overflow:hidden;white-space:nowrap;transition:max-width .18s ease,opacity .14s ease,margin-left .18s ease;}'
+   +'#'+PILL+':hover .dsh-upd-lb{max-width:150px;opacity:1;margin-left:6px;}'
+   +'#'+PILL+'[data-wide] .dsh-upd-lb{max-width:150px;opacity:1;margin-left:6px;}'
    +'#'+PILL+' .dsh-upd-bar{position:absolute;left:0;bottom:0;height:2px;width:0;background:rgba(255,255,255,.6);display:none;}';
   (document.head||document.documentElement).appendChild(st);
  }
  function build(){
-  var r=document.getElementById(ROW);
-  if(!r){
-   r=document.createElement('button');
-   r.id=ROW;
-   r.type='button';
-   var l=document.createElement('span'); l.className='dsh-upd-l';
-   var ic=document.createElement('span'); ic.className='dsh-upd-ic'; setIcon(ic,'sync');
-   var t=document.createElement('span'); t.className='dsh-upd-t'; t.textContent='检查更新';
-   l.appendChild(ic); l.appendChild(t);
-   var v=document.createElement('span'); v.className='dsh-upd-r';
-   r.appendChild(l); r.appendChild(v);
-   r.addEventListener('click', function(){ if(r.getAttribute('data-busy')) return; send(); });
-   document.body.appendChild(r);
-  }
   var p=document.getElementById(PILL);
   if(!p){
    p=document.createElement('button');
@@ -501,7 +523,9 @@ namespace DeepSeekHarness
   var best=null,bestA=0;
   function consider(el){
    if(!el||el.id===ROW||el.id===PILL) return;
-   if(el.contains(document.getElementById(ROW))) return;
+   // 注意：这里**不能**再排除「包含了我们这一行的元素」——v0.9.4 起我们就在面板内部，
+   // 排除了它等于把面板本身排掉，下一轮就再也认不出面板了。
+   if(el===document.body||el===document.documentElement) return;
    var r=el.getBoundingClientRect();
    if(r.width<300||r.height<220) return;
    if(window.innerWidth-r.width<40&&window.innerHeight-r.height<40) return; // 整页容器不算面板
@@ -513,7 +537,7 @@ namespace DeepSeekHarness
   var dlg=document.querySelectorAll('[role=dialog],[role=alertdialog],[aria-modal=true]');
   for(i=0;i<dlg.length;i++) consider(dlg[i]);
   if(best) return best;
-  if(Date.now()-gearAt>20000) return null; // 快照过期，不做结构猜测，宁可不显示
+  if(Date.now()-gearAt>90000) return null; // 快照过期，不做结构猜测，宁可不显示
   var all=document.querySelectorAll('div,section,aside,main,form');
   for(i=0;i<all.length;i++){
    var el=all[i];
@@ -527,26 +551,193 @@ namespace DeepSeekHarness
   }
   return best;
  }
- // 设置面板里那一行：贴面板底部内边距对齐；若面板底部本来就有按钮行（保存/完成之类），
- // 自动往上让开一行，不会盖住它。
- function placeRow(r){
-  var p=settingsPanel();
-  if(!p){ r.style.display='none'; return; }
-  var pr=p.getBoundingClientRect();
-  var pad=12,h=40,lift=0;
-  var btns=p.querySelectorAll('button,[role=button]');
-  for(var i=0;i<btns.length;i++){
-   var b=btns[i];
-   if(b.id===ROW||b.id===PILL||b===r) continue;
-   var br=b.getBoundingClientRect();
-   if(br.width<20||br.height<18) continue;
-   if(br.bottom>pr.bottom-8&&br.top>pr.bottom-104) lift=Math.max(lift, pr.bottom-8-br.top+8);
+ // 面板一旦认出就缓存起来：React 重渲染后仍然认得，不用每次都靠快照去猜。
+ function panelNow(){
+  if(panelRef&&panelRef.isConnected){
+   var r=panelRef.getBoundingClientRect();
+   if(r.width>2&&r.height>2) return panelRef;
   }
-  var w=Math.min(560,Math.max(220,pr.width-pad*2));
-  r.style.display='flex';
-  r.style.left=Math.round(pr.left+pad)+'px';
-  r.style.width=Math.round(w)+'px';
-  r.style.top=Math.round(pr.bottom-pad-h-lift)+'px';
+  panelRef=settingsPanel();
+  return panelRef;
+ }
+ // 量出一条原生设置行「文字左边缘到行左边缘」的距离 —— 直接拿来当我们的内边距，
+ // 这样插进去的那一行跟上下原生行的缩进完全对齐（原生内边距往往在内层元素上，量不到就用 12）。
+ function textInset(el){
+  try{
+   var r=el.getBoundingClientRect();
+   var w=document.createTreeWalker(el,4,null,false);
+   var minL=1e9,n;
+   while((n=w.nextNode())){
+    var v=n.nodeValue;
+    if(!v||!v.replace(/\s/g,'')) continue;
+    var rg=document.createRange();
+    rg.selectNodeContents(n);
+    var b=rg.getBoundingClientRect();
+    if(b.width<=0.5||b.height<=0.5) continue;
+    if(b.left<minL) minL=b.left;
+   }
+   if(minL<1e8) return Math.max(0,Math.min(48,Math.round(minL-r.left)));
+  }catch(e){}
+  return -1;
+ }
+ // 在面板里找一条原生设置行当骨架：宽高像一行、有文字、本身不是按钮/控件；
+ // 再去掉「只是包住另一条候选行」的外层容器，最后取左右对齐的行最多的那一列里最下面一条。
+ function findDonor(p){
+  var pr=p.getBoundingClientRect();
+  var all=p.querySelectorAll('div,section,li');
+  var rows=[];
+  for(var i=0;i<all.length;i++){
+   var el=all[i];
+   if(el.id===ROW||el.id===PILL) continue;
+   var t=el.tagName;
+   if(t==='BUTTON'||t==='A'||t==='LABEL'||t==='INPUT'||t==='SELECT'||t==='TEXTAREA') continue;
+   var role=el.getAttribute('role');
+   if(role&&/button|tab|switch/.test(role)) continue;
+   var r=el.getBoundingClientRect();
+   if(r.width<pr.width*0.55||r.width>pr.width+1) continue;
+   if(r.height<30||r.height>140) continue;
+   if(!(el.textContent||'').replace(/\s/g,'')) continue;
+   rows.push(el);
+  }
+  if(!rows.length) return null;
+  var leaf=[];
+  for(var j=0;j<rows.length;j++){
+   var a=rows[j],ra=a.getBoundingClientRect(),wrap=false;
+   for(var k=0;k<rows.length;k++){
+    if(k===j) continue;
+    var b=rows[k];
+    if(!a.contains(b)) continue;
+    var rb=b.getBoundingClientRect();
+    if(rb.width>ra.width-6&&rb.height>ra.height-6){ wrap=true; break; }
+   }
+   if(!wrap) leaf.push(a);
+  }
+  if(!leaf.length) return null;
+  var groups=[];
+  for(var m=0;m<leaf.length;m++){
+   var rr=leaf[m].getBoundingClientRect(), key=Math.round(rr.left/12), g=null;
+   for(var n=0;n<groups.length;n++){ if(groups[n].key===key){ g=groups[n]; break; } }
+   if(!g){ g={key:key,items:[]}; groups.push(g); }
+   g.items.push({el:leaf[m],r:rr});
+  }
+  var best=null;
+  for(var q=0;q<groups.length;q++){
+   if(!best||groups[q].items.length>best.items.length) best=groups[q];
+  }
+  if(!best||!best.items.length) return null;
+  best.items.sort(function(x,y){ return x.r.top-y.r.top; });
+  // 挑骨架不能只看「最下面那一条」—— 面板底部常有脚注行（按钮/版本号行），
+  // 它的内边距和行高跟正文设置行不是一回事（实测：缩进会量成 48px，行高也矮一截）。
+  // 所以按「多数行的缩进量 + 中位行高」过滤一遍，再取剩下的最下面一条。
+  for(var s=0;s<best.items.length;s++){
+   var it=best.items[s];
+   it.pad=textInset(it.el);
+   if(it.pad<0) it.pad=12;
+   it.h=Math.round(it.r.height);
+  }
+  var mode=best.items[0].pad,modeN=-1;
+  for(var a=0;a<best.items.length;a++){
+   var n=0;
+   for(var b=0;b<best.items.length;b++){ if(Math.abs(best.items[b].pad-best.items[a].pad)<=2) n++; }
+   if(n>modeN){ modeN=n; mode=best.items[a].pad; }
+  }
+  var hs=[];
+  for(var c=0;c<best.items.length;c++) hs.push(best.items[c].h);
+  hs.sort(function(x,y){ return x-y; });
+  var med=hs[Math.floor(hs.length/2)];
+  var keep=[];
+  for(var d=0;d<best.items.length;d++){
+   var k=best.items[d];
+   if(Math.abs(k.pad-mode)<=2&&Math.abs(k.h-med)<=10) keep.push(k);
+  }
+  if(!keep.length) keep=best.items;
+  var last=keep[keep.length-1];
+  return {host:last.el.parentElement||p, donor:last.el, pad:last.pad, h:last.h};
+ }
+ // 用骨架造出「检查更新」这一行并插进列表里（骨架的下一条，位置由排版决定）。
+ function buildRow(info){
+  var donor=info.donor, host=info.host;
+  var o=donor.cloneNode(false);   // 只克隆外层骨架（类名/样式），不带原生内容
+  // 先清掉原生行带来的 id / aria-* / role / data-* 等属性（只留 class 与 style），
+  // 再挂我们自己的 id —— 顺序反了会把刚设的 id 一起清掉，那就会每 600ms 重复插一行。
+  var at=o.attributes;
+  for(var i=at.length-1;i>=0;i--){
+   var nm=at[i].name;
+   if(nm==='class'||nm==='style') continue;
+   o.removeAttribute(nm);
+  }
+  o.id=ROW;
+  o.style.display='flex';
+  o.style.alignItems='center';
+  o.style.justifyContent='space-between';
+  o.style.gap='12px';
+  o.style.width='100%';
+  o.style.boxSizing='border-box';
+  o.style.textAlign='left';
+  o.style.cursor='pointer';
+  o.style.minHeight=(info.h>0?info.h:48)+'px';
+  var px=(info.pad>=0?info.pad:12);
+  o.style.paddingLeft=px+'px';
+  o.style.paddingRight=px+'px';
+  // 左侧只放标题 + 说明：原生设置行左侧就是纯文字，图标若放左边会把我们的标题
+  // 推开 26px，跟上下行对不齐（实测差值 26px）。图标改挂到右侧状态那一组，
+  // 位置正好对应原生行「右侧控件」的位置，更像原生的一行。
+  var l=document.createElement('span'); l.className='dsh-upd-l';
+  var tx=document.createElement('span'); tx.className='dsh-upd-tx';
+  rowTitle=document.createElement('span'); rowTitle.className='dsh-upd-t';
+  rowTitle.textContent='检查更新';
+  rowDesc=document.createElement('span'); rowDesc.className='dsh-upd-d';
+  tx.appendChild(rowTitle); tx.appendChild(rowDesc);
+  l.appendChild(tx);
+  var ic=document.createElement('span'); ic.className='dsh-upd-ic'; setIcon(ic,'sync');
+  rowRight=document.createElement('span'); rowRight.className='dsh-upd-r';
+  var rs=document.createElement('span'); rs.className='dsh-upd-rs';
+  rowRight.appendChild(ic); rowRight.appendChild(rs);
+  o.appendChild(l); o.appendChild(rowRight);
+  rowBox=o; rowIcon=ic; rowIconKind='sync';
+  o.addEventListener('click', function(){ if(o.getAttribute('data-busy')) return; send(); });
+  if(donor.nextSibling) host.insertBefore(o,donor.nextSibling);
+  else host.appendChild(o);
+  return true;
+ }
+ // 实在找不到可克隆的原生行（面板结构不熟）时的兜底：直接作为面板的最后一个子节点
+ // 追加上去 —— 依然是「在面板里」的流式布局，不会像绝对定位那样跑到面板外面去。
+ function fallbackRow(p){
+  var o=document.createElement('div');
+  o.id=ROW;
+  o.style.display='flex';
+  o.style.alignItems='center';
+  o.style.justifyContent='space-between';
+  o.style.gap='12px';
+  o.style.boxSizing='border-box';
+  o.style.padding='10px 16px';
+  o.style.cursor='pointer';
+  var l=document.createElement('span'); l.className='dsh-upd-l';
+  var tx=document.createElement('span'); tx.className='dsh-upd-tx';
+  rowTitle=document.createElement('span'); rowTitle.className='dsh-upd-t';
+  rowTitle.textContent='检查更新';
+  rowDesc=document.createElement('span'); rowDesc.className='dsh-upd-d';
+  tx.appendChild(rowTitle); tx.appendChild(rowDesc);
+  l.appendChild(tx);
+  var ic=document.createElement('span'); ic.className='dsh-upd-ic'; setIcon(ic,'sync');
+  rowRight=document.createElement('span'); rowRight.className='dsh-upd-r';
+  var rs=document.createElement('span'); rs.className='dsh-upd-rs';
+  rowRight.appendChild(ic); rowRight.appendChild(rs);
+  o.appendChild(l); o.appendChild(rowRight);
+  rowBox=o; rowIcon=ic; rowIconKind='sync';
+  o.addEventListener('click', function(){ if(o.getAttribute('data-busy')) return; send(); });
+  p.appendChild(o);
+  return true;
+ }
+ function ensureRow(){
+  if(document.getElementById(ROW)) return true;
+  if(Date.now()-lastInsert<600) return false;  // 插入节流：React 抖 DOM 时别反复插
+  var p=panelNow();
+  if(!p) return false;
+  lastInsert=Date.now();
+  var info=null;
+  try{ info=findDonor(p); }catch(e){ info=null; }
+  return info?buildRow(info):fallbackRow(p);
  }
  // 蓝色胶囊：贴在侧边栏「设置」按钮正上方一行（与设置按钮同列），侧边栏收起时隐藏。
  function placePill(p){
@@ -563,26 +754,31 @@ namespace DeepSeekHarness
  }
  function render(){
   for(var i=0;i<listeners.length;i++){ try{listeners[i](state);}catch(e){} }
-  var r=document.getElementById(ROW);
-  var p=document.getElementById(PILL);
   var now=Date.now();
   var repos=(state.phase!==lastPhase)||(now-lastPlace>400);
   if(repos){ lastPhase=state.phase; lastPlace=now; }
+  // 设置面板里那一行（被 React 重渲染删掉就补回来）
+  ensureRow();
+  var r=document.getElementById(ROW);
   if(r){
-   var rr=r.querySelector('.dsh-upd-r');
-   if(rr) rr.textContent=rowText(state);
+   if(rowTitle) rowTitle.textContent=setRowTitle(state);
+   if(rowDesc) rowDesc.textContent=rowDescText(state);
+   var rs=rowRight&&rowRight.querySelector('.dsh-upd-rs');
+   if(rs) rs.textContent=rowRightText(state);
+   var kind=(state.phase==='available'||state.phase==='downloading')?'down':'sync';
+   if(rowIcon&&kind!==rowIconKind){ setIcon(rowIcon,kind); rowIconKind=kind; }
    if(busy(state)) r.setAttribute('data-busy','1'); else r.removeAttribute('data-busy');
    if(state.phase==='error') r.setAttribute('data-error','1'); else r.removeAttribute('data-error');
-   if(repos) placeRow(r);
   }
+  var p=document.getElementById(PILL);
   if(!p) return;
   if(!pillVisible(state)){ p.style.display='none'; return; }
   if(p.style.display!=='inline-flex'){ p.style.display='inline-flex'; placePill(p); }
   else if(repos) placePill(p);
   var lb=p.querySelector('.dsh-upd-lb');
   if(lb) lb.textContent=pillText(state);
-  var ic=p.querySelector('.dsh-upd-ic');
-  if(ic) setIcon(ic,(state.phase==='ready'||state.phase==='installing')?'sync':'down');
+  var pic=p.querySelector('.dsh-upd-ic');
+  if(pic) setIcon(pic,(state.phase==='ready'||state.phase==='installing')?'sync':'down');
   if(state.phase==='available'){
    p.removeAttribute('data-wide');
    p.removeAttribute('data-busy');
@@ -618,7 +814,7 @@ namespace DeepSeekHarness
  }
  function tick(){
   lastRun=Date.now(); pending=false;
-  if(!document.getElementById(ROW)||!document.getElementById(PILL)) style();
+  if(!document.getElementById(PILL)) style();
   build(); render(); theme();
  }
  // MutationObserver 回调只登记，真实工作经节流合并 —— 启动期 React 高频改 DOM，
@@ -654,74 +850,6 @@ namespace DeepSeekHarness
   }};
  }
  if(document.body) boot(); else document.addEventListener('DOMContentLoaded', boot);
-})();
-
-(function(){
- // 窗口缩放热区由网页判定（WebView2 的子窗口 airspace 规则会让 WinForms 贴边抓手
- // 收不到鼠标），按下后把方向上报给桌面壳，桌面壳按鼠标位移自己换算窗口边界。
- // 注意：这里**不含上边** —— 窗口上端那 40px 是桌面壳自绘的标题带（真正的 WinForms
- // 区域），顶边与左上/右上角由标题带自己处理，页面顶端不是窗口顶端。
- if (window.__dshResizeReady) return;
- if (window.top !== window) return; // 只在顶层文档注入，iframe 里不注册
- window.__dshResizeReady = true;
- var EDGE=6;
- var CUR={left:'w-resize',right:'e-resize',bottom:'s-resize',
-  bottomleft:'nesw-resize',bottomright:'nwse-resize'};
- function post(m){ try{ window.chrome.webview.postMessage(m); }catch(e){} }
- // 光标必须用 !important 规则压住 —— 页面根容器自带的 cursor 会让挂在 <html> 上的
- // 光标失效；左下/右下角用规范的 nesw-resize / nwse-resize，避免斜向箭头反向。
- var edgeSt=document.createElement('style');
- edgeSt.id='dsh-edge-cursor-css';
- edgeSt.textContent='html.dsh-edge,html.dsh-edge *{cursor:var(--dsh-edge-cursor,default)!important}';
- function ensureEdgeCss(){
-  try{ if(!edgeSt.parentNode) (document.head||document.documentElement).appendChild(edgeSt); }catch(e){}
- }
- function setEdgeCursor(c){
-  var de=document.documentElement;
-  try{
-   if(c){ de.style.setProperty('--dsh-edge-cursor',c); de.classList.add('dsh-edge'); }
-   else if(de.classList.contains('dsh-edge')) de.classList.remove('dsh-edge');
-  }catch(e){ if(de.style) de.style.cursor=c||''; }
- }
- function edgeAt(x,y){
-  var w=document.documentElement.clientWidth||window.innerWidth;
-  var h=document.documentElement.clientHeight||window.innerHeight;
-  var l=x<=EDGE,r=x>=w-EDGE,b=y>=h-EDGE;
-  if(l&&r) return ''; // 窗口窄到两条边重在一起时不做缩放，避免误判
-  if(b&&l) return 'bottomleft';
-  if(b&&r) return 'bottomright';
-  if(b) return 'bottom';
-  if(l) return 'left';
-  if(r) return 'right';
-  return '';
- }
- ensureEdgeCss();
- document.addEventListener('mousemove',function(e){
-  ensureEdgeCss();
-  if(window.__dshMax||window.__dshResizing){ setEdgeCursor(''); return; }
-  var d=edgeAt(e.clientX,e.clientY);
-  setEdgeCursor(d?CUR[d]:'');
- },true);
- document.addEventListener('mouseleave',function(){ setEdgeCursor(''); },true);
- document.addEventListener('mouseup',function(e){
-  window.__dshResizing=false;
-  if(window.__dshMax){ setEdgeCursor(''); return; }
-  var d=edgeAt(e.clientX,e.clientY);
-  setEdgeCursor(d?CUR[d]:'');
- },true);
- // 只处理左 / 右 / 下边与两个下角：上端属于标题带。
- document.addEventListener('mousedown',function(e){
-  if(e.button!==0||window.__dshMax) return;
-  var d=edgeAt(e.clientX,e.clientY);
-  if(!d) return;
-  e.preventDefault();
-  e.stopImmediatePropagation();
-  window.__dshResizing=true;
-  setEdgeCursor(CUR[d]);
-  post('dsh-resize:'+d);
- },true);
- // 就绪上报：桌面壳据此同步一次「是否最大化」（最大化时网页侧边缘热区要停用）
- post('dsh-chrome-ready');
 })();
 ";
 
@@ -825,6 +953,25 @@ namespace DeepSeekHarness
                 cp.ClassStyle |= 0x00020000;                 // CS_DROPSHADOW
                 cp.Style |= 0x00020000 | 0x00080000;         // WS_MINIMIZEBOX | WS_SYSMENU
                 return cp;
+            }
+        }
+
+        // v0.9.4：启动默认就是「全屏」——即最大化到当前显示器的工作区。
+        // 放在 OnLoad 而不是构造函数里：无边框窗口的 MaximizedBounds 必须等窗口句柄
+        // 存在、能问出所在显示器之后才能设；而 OnLoad 早于第一次绘制，用户看不到
+        // 「先 1280x820 再跳大」的闪一下。
+        // 不设的话无边框窗口最大化会盖住任务栏（系统按整屏算），所以先限定工作区。
+        protected override void OnLoad(EventArgs e)
+        {
+            base.OnLoad(e);
+            try
+            {
+                MaximizedBounds = Screen.FromHandle(Handle).WorkingArea;
+                WindowState = FormWindowState.Maximized;
+            }
+            catch (Exception ex)
+            {
+                Log.Error("启动最大化", ex);   // 失败就保持默认窗口尺寸，不影响使用
             }
         }
 
