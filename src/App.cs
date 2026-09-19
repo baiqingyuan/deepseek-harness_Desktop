@@ -481,88 +481,58 @@ namespace DeepSeekHarness
   }
   return false;
  }
- // 窗口按钮固定钉死在右上角，绝不移动。让位不再用 transform / padding 这类「外科手术」
- // （v0.8.10 的 translateX 会把包含侧边栏的整条头部一起平移 → 侧边栏错位、右侧空白、
- // 控件群被拆散；v0.8.9 的 padding 会被 overflow 裁剪）。改为在 dsh 头部行（flex/grid
- // 容器）末尾追加一个固定宽度的占位元素，让布局引擎自己把右上角控件整组推到窗口
- // 按钮左侧——所有控件一起移动、间距不变、不会被裁剪。React 重渲染删掉后由 tick 补回。
- var CAP_W=140; // 3 个窗口按钮 × 46px，留 2px 余量
- function reserve(){
-  var box=document.getElementById(BOX);
-  var sp=document.getElementById('dsh-cap-spacer');
-  var cands=document.querySelectorAll(
-   'button,a,[role=button],[class*=button],[class*=Button],[class*=trigger],[class*=Trigger],[class*=icon],[class*=Icon]');
-  var w=window.innerWidth;
-  var target=null;
-  for(var i=0;i<cands.length;i++){
-   var el=cands[i];
-   if(box&&box.contains(el)) continue;
-   var r=el.getBoundingClientRect();
-   if(r.width<10||r.width>180||r.height<12||r.height>72) continue;
-   if(r.top>56||r.bottom<0) continue;
-   if(r.right<w-290) continue; // 只看最右 290px 内的顶部控件
-   // 沿祖先链找到横贯整行、贴顶的头部行容器
-   var p=el.parentElement, guard=0;
-   while(p&&guard++<10){
-    var pr=p.getBoundingClientRect();
-    if(pr.width>=w*0.9&&pr.top<=8) break;
-    p=p.parentElement;
-   }
-   if(p) target=p;
-   break;
-  }
-  if(!target){ if(sp) sp.parentNode&&sp.parentNode.removeChild(sp); return; }
-  var cs=getComputedStyle(target);
-  if(cs.display.indexOf('flex')<0&&cs.display.indexOf('grid')<0) return; // 非弹性布局不动它，避免撑坏结构
-  if(sp&&sp.parentElement!==target){
-   sp.parentNode.removeChild(sp); sp=null;
-  }
-  if(!sp){
-   sp=document.createElement('div');
-   sp.id='dsh-cap-spacer';
-   sp.style.flex='0 0 auto';
-   sp.style.width=CAP_W+'px';
-   sp.style.height='1px';
-   sp.style.pointerEvents='none';
-   target.appendChild(sp);
-  }
- }
- // 碰撞兜底：占位元素只对 flex/grid 行内子项有效，dsh 头部还有个别绝对定位的控件
- // （如右上角的 ✕）推不动，会盖到窗口按钮上。每轮定位后扫描与窗口按钮区域重叠的
- // 网页控件，把它们作为**一组**按同一位移整组左移 —— 组内间距保持不变，图标不会
- // 贴脸也不会被拆散（排版对齐 WorkBuddy 头部：窗口按钮钉死右上，页面控件组在左
- // 侧等距排开）。位移每轮先整体还原再按当前布局重算，侧边栏开合 / 窗口缩放后不会
- // 残留旧偏移，视觉位置与点击目标始终一致（此前逐元素独立平移 + 只移不还原，
- // 曾导致图标错位乱排、点击落到别的控件上）。
+ // 窗口按钮固定钉死在右上角，绝不移动。让位方案演进：
+ // - 水平方向折腾全都有副作用：padding 被 overflow 裁剪（v0.8.9）、translateX 平移整条
+ //   头部致侧边栏错位（v0.8.10）、占位元素推不动绝对定位控件（v0.8.11）、整组水平左移
+ //   会把下拉菜单和相邻按钮一起拽走，视觉与热区错乱（v0.8.13）。
+ // - v0.8.14 起改为**垂直让位**：与窗口按钮区域重叠的顶部控件，作为一组按同一位移
+ //   **整体下移**到窗口按钮正下方。x 坐标完全不动 → 水平间距、对齐关系天然不乱；
+ //   下拉菜单从按钮自身位置弹出，也不会错位。每轮先还原再重算，布局变化不残留。
  var overlapMoved=[];
+ function isPopup(el){
+  // 弹层（菜单/提示/气泡）跟着触发器走，不参与下移，否则菜单文字会错位
+  for(var p=el,guard=0;p&&guard++<8;p=p.parentElement){
+   if(p===document.body) break;
+   var c=p.className||'';
+   var cstr=(typeof c==='string')?c:(c.baseVal||'');
+   if(/(menu|Menu|popover|Popover|dropdown|Dropdown|tooltip|Tooltip|toast|Toast|popup|Popup|float|Float)/.test(cstr)) return true;
+   var role=p.getAttribute&&p.getAttribute('role');
+   if(role==='menu'||role==='tooltip'||role==='dialog'||role==='listbox') return true;
+  }
+  return false;
+ }
  function clearOverlap(){
   var box=document.getElementById(BOX);
   if(!box) return;
   for(var j=0;j<overlapMoved.length;j++){ overlapMoved[j].style.transform=''; }
   overlapMoved.length=0;
+  // 清理 v0.8.11-0.8.13 遗留的占位元素
+  var sp=document.getElementById('dsh-cap-spacer');
+  if(sp&&sp.parentNode) sp.parentNode.removeChild(sp);
   var br=box.getBoundingClientRect();
   if(br.width===0) return;
   var cands=document.querySelectorAll(
    'button,a,[role=button],[class*=button],[class*=Button],[class*=trigger],[class*=Trigger],[class*=icon],[class*=Icon]');
-  var hits=null,maxRight=0;
+  var hits=null,minTop=0;
   for(var i=0;i<cands.length;i++){
    var el=cands[i];
    if(box.contains(el)) continue;
+   if(isPopup(el)) continue;
    var r=el.getBoundingClientRect();
    if(r.width<6||r.height<10) continue;
-   if(r.top>56||r.bottom<0) continue;
+   if(r.top>56||r.bottom<0) continue; // 只处理贴顶一行的控件
    if(r.right>br.left+2&&r.left<br.right-2){ // 与窗口按钮区重叠
-    if(!hits) hits=[];
+    if(!hits){ hits=[]; minTop=r.top; }
+    else if(r.top<minTop) minTop=r.top;
     hits.push(el);
-    if(r.right>maxRight) maxRight=r.right;
    }
   }
   if(!hits) return;
-  // 整组左移：让最右元素的右缘停在窗口按钮左侧 6px，组内每位移量相同
-  var delta=Math.floor((br.left-6)-maxRight);
-  if(delta>=0) return;
+  // 整组下移：组顶停在窗口按钮下方 8px，组内每位移量相同、x 不变
+  var delta=Math.ceil(br.bottom+8-minTop);
+  if(delta<=0) return;
   for(var k=0;k<hits.length;k++){
-   hits[k].style.transform='translateX('+delta+'px)';
+   hits[k].style.transform='translateY('+delta+'px)';
    overlapMoved.push(hits[k]);
   }
  }
@@ -571,7 +541,6 @@ namespace DeepSeekHarness
   if(!box) return;
   box.style.left='auto';
   box.style.right='0px';
-  reserve();
   clearOverlap();
  }
  window.__dshCaptionPlace=place;
