@@ -2,6 +2,21 @@
 
 本项目所有重要改动记录于此。格式参考 [Keep a Changelog](https://keepachangelog.com/)，版本号遵循 [语义化版本](https://semver.org/lang/zh-CN/)。
 
+## [0.9.6] - 2026-09-24
+
+### 变更
+- **升级官方 Harness 稳定运行时至 `@deepseek-ai/dsh` `0.1.5-rc.3`**：保留官方 `dsh web --no-open --port` 启动方式、一次性 token URL 与 localhost 安全边界；已在 Windows 本地依赖闭包中验证启动参数和鉴权 URL 输出。
+- **发布脚本默认版本同步为 `0.9.6`**：直接运行 `package-release.ps1` 时不再误用历史版本号 `0.7.1`，产物名、安装包和应用内更新清单保持一致。
+
+### 修复
+- **NSIS 自动下载不再把 SourceForge HTML 页面误当作 ZIP**：改用 Windows 自带 `curl.exe` 跟随镜像重定向，并对下载文件执行官方 SHA-256 完整性校验；下载页、截断文件或被篡改文件都会在解压前给出明确错误。
+- **中文 NSIS 脚本在非 UTF-8 系统代码页下无法编译**：调用 `makensis` 时显式传入 `/INPUTCHARSET UTF8`，避免无 BOM 的 `installer.nsi` 被误按 ACP 解析并报 `Bad text encoding`。
+- **深目录构建时 NSIS 无法读取嵌套依赖**：检测到打包文件路径接近 `MAX_PATH` 时，自动为仓库根目录分配临时盘符，完成后立即解除映射，避免 `File: failed opening file`。
+
+### 验证
+- `dsh web --help`：确认 `--no-open`、`--port`、`--host` 与 `--trusted-host` 参数可用。
+- `dsh web --no-open --port <port>`：确认服务可启动并输出经 token 认证的本地 URL，桌面壳现有 WebView2 导航逻辑兼容。
+
 ## [0.9.5] - 2026-09-19
 
 ### 修复

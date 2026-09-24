@@ -64,13 +64,13 @@
 内置版本可通过参数覆盖（默认值见 `build.ps1` 的 `param` 块）：
 
 ```powershell
-./build.ps1 -DshVersion latest   # 或 alpha / 具体版本号，如 0.1.6-alpha.2
+./build.ps1 -DshVersion latest   # 或 alpha / 具体版本号；默认锁定 0.1.5-rc.3
 ./build.ps1 -NodeVersion v24.21.0
 ```
 
 ## 🔄 与上游 / 官方桌面版
 
-- 上游仓库：[deepseek-ai/deepseek-harness](https://github.com/deepseek-ai/deepseek-harness)，CLI 包为 [`@deepseek-ai/dsh`](https://www.npmjs.com/package/@deepseek-ai/dsh)。本项目默认锁定其 npm `latest` 通道。
+- 上游仓库：[deepseek-ai/deepseek-harness](https://github.com/deepseek-ai/deepseek-harness)，CLI 包为 [`@deepseek-ai/dsh`](https://www.npmjs.com/package/@deepseek-ai/dsh)。本项目默认锁定已验证的稳定版 `0.1.5-rc.3`；需要尝鲜时可通过 `-DshVersion latest` 或 `-DshVersion alpha` 显式切换。
 - 上游已另有一个 **Electron 桌面版**（仓库内 `apps/desktop`，含自动更新与 Windows 安装包）。本项目定位是**极薄的 WinForms + WebView2 原生壳**：无 Electron 运行时、体积更小、随官方 npm 包一键升级；更新走轻量的「应用内检查 + 下载安装包覆盖」，而不是内置自动更新框架。两者可并存，按需选择。
 - 上游若发布破坏性变更（例如 Web 控制台鉴权方式变化），本项目的适配点集中在 `src/App.cs` 的服务启动与就绪检测部分。
 

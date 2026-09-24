@@ -3,10 +3,12 @@
 param(
     # dsh 版本：默认锁定官方 npm `latest`（稳定通道）。
     # 也可填 'latest' / 'alpha' 由 npm dist-tag 自动解析（alpha = 官方 master 上的预发布线）。
-    [string]$DshVersion = "0.1.5-rc.2",
+    # 2026-09-23: official stable channel now resolves to 0.1.5-rc.3.
+    # Keep a concrete version here so release builds remain reproducible.
+    [string]$DshVersion = "0.1.5-rc.3",
     [string]$WebView2Version = "1.0.4129.50",
     [string]$NodeVersion = "v24.21.0",
-    [string]$Version = "0.9.5"
+    [string]$Version = "0.9.6"
 )
 $ErrorActionPreference = 'Stop'
 
@@ -208,19 +210,43 @@ if (-not (Test-Path $nsisExe)) {
     } else {
         Write-Host "    未检测到 makensis，下载 NSIS 便携版 ..."
         $nsisVer = "3.11"
+        # Official hash published for nsis-3.11.zip. SourceForge may return an
+        # HTML mirror-selection page with HTTP 200, so file size alone is not
+        # sufficient to decide whether the download is a real archive.
+        $nsisSha256 = "C7D27F780DDB6CFFB4730138CD1591E841F4B7EDB155856901CDF5F214394FA1"
         $nsisZip = Join-Path $env:TEMP "nsis-$nsisVer.zip"
         $urls = @(
-            "https://downloads.sourceforge.net/project/nsis/NSIS%203/$nsisVer/nsis-$nsisVer.zip",
+            "https://downloads.sourceforge.net/project/nsis/NSIS%203/$nsisVer/nsis-$nsisVer.zip?download=",
             "https://sourceforge.net/projects/nsis/files/NSIS%203/$nsisVer/nsis-$nsisVer.zip/download"
         )
         $ok = $false
         foreach ($u in $urls) {
             try {
-                Invoke-WebRequest -Uri $u -OutFile $nsisZip -TimeoutSec 180 -ErrorAction Stop
-                if ((Get-Item $nsisZip).Length -gt 100KB) { $ok = $true; break }
+                Remove-Item -LiteralPath $nsisZip -Force -ErrorAction SilentlyContinue
+                # Windows 10/11 ships curl.exe. It handles SourceForge's signed
+                # mirror redirect more reliably than Windows PowerShell 5.1's
+                # Invoke-WebRequest, which can save the HTML download page.
+                $curl = Get-Command curl.exe -ErrorAction SilentlyContinue
+                if ($curl) {
+                    & $curl.Source --fail --location --silent --show-error `
+                        --retry 2 --retry-delay 2 --output $nsisZip $u
+                    if ($LASTEXITCODE -ne 0) { throw "curl 下载失败（退出码 $LASTEXITCODE）" }
+                } else {
+                    Invoke-WebRequest -Uri $u -OutFile $nsisZip -TimeoutSec 180 `
+                        -UserAgent "Mozilla/5.0" -ErrorAction Stop
+                }
+                if (-not (Test-Path $nsisZip)) { throw "下载未生成文件" }
+                $actualHash = (Get-FileHash -LiteralPath $nsisZip -Algorithm SHA256).Hash.ToUpperInvariant()
+                if ($actualHash -ne $nsisSha256) {
+                    throw "SHA-256 校验失败（收到 $actualHash）"
+                }
+                $ok = $true
+                break
             } catch { Write-Host "    下载失败: $u" }
         }
-        if (-not $ok) { throw "NSIS 下载失败，请手动安装 NSIS 后重试（https://nsis.sourceforge.io/Download）。" }
+        if (-not $ok) {
+            throw "NSIS 下载或完整性校验失败，请手动安装 NSIS 后重试（https://nsis.sourceforge.io/Download）。"
+        }
         Expand-Archive -LiteralPath $nsisZip -DestinationPath $nsisDir -Force
         # NSIS 压缩包顶层文件夹为 nsis-3.11/
         $extracted = Join-Path $nsisDir "nsis-$nsisVer"
@@ -232,8 +258,45 @@ if (-not (Test-Path $nsisExe)) {
 }
 if (-not (Test-Path $nsisExe)) { throw "未找到 makensis.exe" }
 $outExe = Join-Path $root "dist\DeepSeekHarness-Setup-v$Version-win-x64.exe"
-& $nsisExe "/DVERSION=$Version" "/DAPP_SOURCE=$dist" "/DOUT=$outExe" "$root\installer.nsi"
-if ($LASTEXITCODE -ne 0) { throw "NSIS 编译失败" }
+$nsisAppSource = $dist
+$nsisOut = $outExe
+$substDrive = $null
+
+# NSIS 3.x still opens files through APIs affected by the traditional MAX_PATH
+# limit. Deep checkout roots plus nested node_modules paths can exceed it even
+# when PowerShell itself copied the files successfully. Map the repository root
+# to a temporary drive only when at least one payload path is too long.
+$hasLongPayloadPath = Get-ChildItem -LiteralPath $dist -Recurse -File -ErrorAction SilentlyContinue |
+    Where-Object { $_.FullName.Length -ge 240 } |
+    Select-Object -First 1
+if ($hasLongPayloadPath) {
+    $usedDrives = @(Get-PSDrive -PSProvider FileSystem | ForEach-Object { $_.Name.ToUpperInvariant() })
+    foreach ($candidate in @('Z','Y','X','W','V','U','T','S','R')) {
+        if ($usedDrives -notcontains $candidate) {
+            & subst.exe "$candidate`:" $root
+            if ($LASTEXITCODE -eq 0) {
+                $substDrive = "$candidate`:"
+                $nsisAppSource = "$substDrive\dist\DeepSeekHarness"
+                $nsisOut = "$substDrive\dist\DeepSeekHarness-Setup-v$Version-win-x64.exe"
+                Write-Host "    路径较深，NSIS 临时使用 $substDrive 映射构建目录"
+                break
+            }
+        }
+    }
+    if (-not $substDrive) { throw "无法为 NSIS 分配临时盘符以规避 Windows 长路径限制" }
+}
+
+$nsisExit = 1
+try {
+    # installer.nsi is UTF-8 without a BOM. Explicitly name the input charset so
+    # makensis does not parse Chinese comments/strings using the machine ACP.
+    & $nsisExe /INPUTCHARSET UTF8 "/DVERSION=$Version" "/DAPP_SOURCE=$nsisAppSource" `
+        "/DOUT=$nsisOut" "$root\installer.nsi"
+    $nsisExit = $LASTEXITCODE
+} finally {
+    if ($substDrive) { & subst.exe $substDrive /D | Out-Null }
+}
+if ($nsisExit -ne 0) { throw "NSIS 编译失败" }
 Write-Host "    已生成: $outExe"
 
 Write-Host ""
