@@ -3,12 +3,12 @@
 param(
     # dsh 版本：默认锁定官方 npm `latest`（稳定通道）。
     # 也可填 'latest' / 'alpha' 由 npm dist-tag 自动解析（alpha = 官方 master 上的预发布线）。
-    # 2026-09-23: official stable channel now resolves to 0.1.5-rc.3.
+    # 2026-09-28: official latest channel now resolves to 0.1.7-rc.2.
     # Keep a concrete version here so release builds remain reproducible.
-    [string]$DshVersion = "0.1.5-rc.3",
+    [string]$DshVersion = "0.1.7-rc.2",
     [string]$WebView2Version = "1.0.4129.50",
     [string]$NodeVersion = "v24.21.0",
-    [string]$Version = "0.9.6"
+    [string]$Version = "0.9.7"
 )
 $ErrorActionPreference = 'Stop'
 
@@ -21,7 +21,7 @@ if ($DshVersion -eq 'latest' -or $DshVersion -eq 'alpha') {
     } catch { }
     if ($resolved) { $resolved = ([string]$resolved).Trim() }
     if (-not $resolved -or $resolved -notmatch '^\d') {
-        throw "无法从 npm 解析 @deepseek-ai/dsh@$tag 的版本号，请显式指定 -DshVersion（例如 0.1.5-rc.2）。"
+        throw "无法从 npm 解析 @deepseek-ai/dsh@$tag 的版本号，请显式指定 -DshVersion（例如 0.1.7-rc.2）。"
     }
     $DshVersion = $resolved
     Write-Host "dsh dist-tag '$tag' -> $DshVersion"
