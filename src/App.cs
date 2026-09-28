@@ -264,6 +264,10 @@ namespace DeepSeekHarness
         // dsh 每次启动都会生成一次性 token，并把带 token 的 URL 打到 stdout；
         // 桌面壳必须拿到它才能通过新版 Web 控制台的浏览器鉴权（否则所有 /api 调用 401）。
         private readonly TaskCompletionSource<string> readyUrlSource = new TaskCompletionSource<string>();
+        // 本地服务在窗体构造完成后立即后台预热；WebView2 环境则在 OnLoad 创建。
+        // Shown 事件只负责接管这两个已经在运行的任务，缩短首屏等待。
+        private Task startupServerLaunchTask;
+        private Task<CoreWebView2Environment> startupEnvironmentTask;
         private string diagnosticsHint;
         private Panel titleBar;
         private Label titleLabel;
@@ -908,6 +912,10 @@ namespace DeepSeekHarness
 
             InitializeTray();
 
+            // 服务启动不依赖窗口句柄，可在消息循环第一次绘制前抢先进行。
+            // 异常会保存在 Task 中，随后由 InitializeAsync 统一展示，不会静默丢失。
+            startupServerLaunchTask = Task.Run(new Action(PrepareAndLaunchServer));
+
             Shown += async delegate
             {
                 RefreshAppIcon();   // 此刻 DPI 缩放已生效，按控件的真实像素宽度再取一次图标帧
@@ -976,6 +984,9 @@ namespace DeepSeekHarness
             {
                 Log.Error("启动最大化", ex);   // 失败就保持默认窗口尺寸，不影响使用
             }
+            // WebView2 环境需要 STA/UI 上下文；在 OnLoad 启动后，创建过程可与
+            // 首次绘制以及仍在后台启动的 dsh 服务继续并行。
+            startupEnvironmentTask = PrepareWebViewEnvironmentAsync();
         }
 
         protected override void OnResize(EventArgs e)
@@ -1250,7 +1261,9 @@ namespace DeepSeekHarness
             if (resizeTimer == null)
             {
                 resizeTimer = new System.Windows.Forms.Timer();
-                resizeTimer.Interval = 12; // ≈80Hz，拖起来跟手
+                // 与常见显示器的 60Hz 刷新节奏对齐，避免 80Hz 轮询反复触发
+                // WinForms + WebView2 的两套布局，降低缩放时的抖动和 CPU 峰值。
+                resizeTimer.Interval = 16;
                 resizeTimer.Tick += ResizeTick;
             }
             resizeTimer.Start();
@@ -1446,7 +1459,7 @@ namespace DeepSeekHarness
                 // 以前是「等服务就绪 → 再初始化 WebView2」串行走，白白多花 1-3 秒，
                 // 而且 WebView2 的初始化压在 UI 线程上，正是启动进度条卡顿的来源。
                 Task<string> serverTask = StartServerIfNeededAsync();
-                Task<CoreWebView2Environment> envTask = PrepareWebViewEnvironmentAsync();
+                Task<CoreWebView2Environment> envTask = startupEnvironmentTask ?? PrepareWebViewEnvironmentAsync();
 
                 string startUrl = await serverTask;
                 if (shuttingDown) return;
@@ -1597,7 +1610,9 @@ namespace DeepSeekHarness
             WebView2 view = null;
             try
             {
-                view = new WebView2 { Dock = DockStyle.None };
+                // 页面真正有内容前保持隐藏，让原生加载卡片继续覆盖，避免 WebView2
+                // 初始化完成到 SPA 首屏绘制之间闪现空白/纯色画面。
+                view = new WebView2 { Dock = DockStyle.None, Visible = false };
                 Controls.Add(view);
                 view.Bounds = new Rectangle(0, ContentTop, Math.Max(0, ClientSize.Width),
                     Math.Max(0, ClientSize.Height - ContentTop));
@@ -1626,15 +1641,14 @@ namespace DeepSeekHarness
                 view.CoreWebView2.Settings.IsZoomControlEnabled = false;
                 // 底色与主题一致（深色），避免加载期闪一下突兀的白底
                 view.DefaultBackgroundColor = UI.WindowBg;
+                view.CoreWebView2.DOMContentLoaded += OnDomContentLoaded;
                 view.CoreWebView2.NavigationCompleted += OnNavigationCompleted;
+                webView = view;
                 // startUrl 形如 http://127.0.0.1:3080/?token=xxx：
                 // 服务端校验 token 后写入会话 Cookie 并 303 跳转到干净的 /，之后一切正常。
                 view.Source = new Uri(startUrl);
                 if (string.IsNullOrEmpty(readyUrl)) readyUrl = startUrl;
 
-                // WebView 就绪，移除启动占位卡片
-                RemoveLoadingPlaceholder();
-                webView = view;
                 LayoutContent(); // 再对齐一次（标题带高度/客户端尺寸以这一刻为准）
                 // 当前状态立刻同步一次：若启动时已静默查到新版本，按钮一出现就是「新版本」
                 PublishUpdateState(updatePhase, updatePercent, pendingUpdate == null ? "" : pendingUpdate.Version, true);
@@ -1834,6 +1848,8 @@ namespace DeepSeekHarness
 
         private void OnNavigationCompleted(object sender, CoreWebView2NavigationCompletedEventArgs e)
         {
+            // DOMContentLoaded 通常更早；这里作为静态页/旧运行时的成功兜底。
+            if (e.IsSuccess) RevealWebView();
             if (!e.IsSuccess && !shuttingDown && !navWarned)
             {
                 navWarned = true;
@@ -1843,12 +1859,38 @@ namespace DeepSeekHarness
             }
         }
 
+        private void OnDomContentLoaded(object sender, CoreWebView2DOMContentLoadedEventArgs e)
+        {
+            RevealWebView();
+        }
+
+        // 首屏 DOM 已经可绘制后再一次性交接原生占位与 WebView，减少白屏和闪烁。
+        private void RevealWebView()
+        {
+            if (shuttingDown || IsDisposed || webView == null || webView.IsDisposed || webView.Visible) return;
+            try
+            {
+                SuspendLayout();
+                webView.Visible = true;
+                webView.BringToFront();
+                RemoveLoadingPlaceholder();
+                LayoutContent();
+            }
+            finally
+            {
+                ResumeLayout(true);
+            }
+        }
+
         // 启动本地 dsh Web 服务，返回本次可直接访问的起始 URL（带一次性 token）。
         private async Task<string> StartServerIfNeededAsync()
         {
             // 端口探测、WMI 查残留进程、启动 node 全都是阻塞操作。以前它们跑在 UI 线程上，
             // 和 WebView2 初始化挤在一起，正是启动动画一卡一卡的来源；现在丢到后台线程。
-            await Task.Run(new Action(PrepareAndLaunchServer));
+            Task launchTask = startupServerLaunchTask;
+            if (launchTask == null)
+                launchTask = Task.Run(new Action(PrepareAndLaunchServer));
+            await launchTask;
             return await WaitForReadyUrlAsync();
         }
 
@@ -1897,6 +1939,13 @@ namespace DeepSeekHarness
             psi.WindowStyle = ProcessWindowStyle.Hidden;
             psi.RedirectStandardOutput = true;
             psi.RedirectStandardError = true;
+            // Node 24 支持持久化模块编译缓存。首次启动生成缓存，后续启动可以直接复用，
+            // 对 dsh 这种模块数量较多的 CLI 尤其有效；缓存与应用数据分离，不污染便携目录。
+            string compileCache = Path.Combine(
+                Environment.GetFolderPath(Environment.SpecialFolder.LocalApplicationData),
+                "DeepSeekHarness", "NodeCompileCache");
+            try { Directory.CreateDirectory(compileCache); } catch { }
+            psi.EnvironmentVariables["NODE_COMPILE_CACHE"] = compileCache;
 
             serverProc = Process.Start(psi);
             if (serverProc == null) throw new Exception("无法启动 dsh 服务进程。");
@@ -1953,25 +2002,36 @@ namespace DeepSeekHarness
         {
             DateTime start = DateTime.UtcNow;
             DateTime portOpenAt = DateTime.MinValue;
+            DateTime nextPortProbe = DateTime.MinValue;
             while (true)
             {
                 if (serverProc != null && serverProc.HasExited && !readyUrlSource.Task.IsCompleted)
                     throw new Exception("dsh 服务进程已退出。" + ErrorTailText());
                 if (readyUrlSource.Task.IsCompleted) return readyUrlSource.Task.Result;
 
-                bool open = await Task.Run(() => IsPortOpen(port));
-                if (open && portOpenAt == DateTime.MinValue) portOpenAt = DateTime.UtcNow;
-                if (open && portOpenAt != DateTime.MinValue &&
-                    DateTime.UtcNow - portOpenAt > TimeSpan.FromSeconds(10))
-                    return "http://127.0.0.1:" + port + "/";
+                DateTime now = DateTime.UtcNow;
+                if (now >= nextPortProbe)
+                {
+                    bool open = await Task.Run(() => IsPortOpen(port));
+                    if (open && portOpenAt == DateTime.MinValue) portOpenAt = DateTime.UtcNow;
+                    if (open && portOpenAt != DateTime.MinValue &&
+                        DateTime.UtcNow - portOpenAt > TimeSpan.FromSeconds(10))
+                        return "http://127.0.0.1:" + port + "/";
+                    nextPortProbe = DateTime.UtcNow.AddSeconds(1);
+                }
 
                 if (DateTime.UtcNow - start > TimeSpan.FromSeconds(90))
                     throw new Exception("等待 dsh 服务就绪超时（90 秒）。" + ErrorTailText());
 
-                // 不再显示已等待秒数（用户反馈：首次启动不要跳秒），固定一句提示
-                BeginInvoke(new Action(() =>
-                    SetLoadingText("正在启动本地服务，请稍候…")));
-                await Task.Delay(500);
+                // 就绪 URL 是权威信号：直接等待它或短周期诊断 tick，避免原先固定 500ms
+                // 轮询让已经启动好的服务平均再多等约 250ms。
+                Task tick = Task.Delay(150);
+                Task completed = await Task.WhenAny(readyUrlSource.Task, tick);
+                if (completed == readyUrlSource.Task) return await readyUrlSource.Task;
+
+                // 文案固定，不显示跳秒；只在仍未就绪时刷新。
+                if (!shuttingDown && !IsDisposed)
+                    BeginInvoke(new Action(() => SetLoadingText("正在启动本地服务，请稍候…")));
             }
         }
 
