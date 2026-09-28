@@ -301,6 +301,7 @@ namespace DeepSeekHarness
         private ToolStripMenuItem trayStatusItem;
         // 最近一次查到的可用更新（启动时静默检查发现后，点托盘气泡或界面按钮即可升级）
         private UpdateInfo pendingUpdate;
+        private string notifiedUpdateVersion;
         private UpdateInfo cachedUpdateInfo;
         private DateTime cachedUpdateAt = DateTime.MinValue;
         // 更新流程状态：会同步给网页里的左下角更新按钮（idle/available/downloading/ready…）
@@ -2772,9 +2773,14 @@ namespace DeepSeekHarness
                     // 只报告「发现新版本」：界面上的蓝色胶囊 / 设置里的那一行会亮起来，
                     // 什么时候下载由用户点按钮决定，下载进度也显示在那个按钮上。
                     PublishUpdateState("available", 0, info.Version, true);
-                    if (!WebUpdateUi)
+                    // 主界面里的更新胶囊可能因侧边栏折叠而不可见；每个新版本额外提示
+                    // 一次系统托盘气泡，让用户明确知道更新已经推送。重复检查不会反复打扰。
+                    if (!string.Equals(notifiedUpdateVersion, info.Version, StringComparison.OrdinalIgnoreCase))
+                    {
+                        notifiedUpdateVersion = info.Version;
                         ShowBalloon("发现新版本 v" + info.Version + "，点此升级（或右键托盘选「检查更新…」）。",
                             ToolTipIcon.Info);
+                    }
                     return;
                 }
 

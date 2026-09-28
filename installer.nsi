@@ -47,13 +47,22 @@ SetCompressor /SOLID lzma
 ; 覆盖安装（升级）前先结束正在运行的应用 —— 包括最小化到托盘常驻的实例，
 ; 否则 DeepSeekHarness.exe / node.exe 被占用会导致覆盖失败。
 Function .onInit
-  nsExec::Exec 'taskkill /IM "${APP_EXE}" /F'
+  ; /T 必须保留：桌面壳直接拉起 node.exe 作为本地服务。只结束主进程会留下
+  ; node 子进程继续锁定 $INSTDIR\node.exe，覆盖安装就会报「无法打开要写入的文件」。
+  nsExec::Exec 'taskkill /IM "${APP_EXE}" /T /F'
   Pop $0
   Sleep 800
 FunctionEnd
 
 Section "Main" SecMain
   SetOutPath "$INSTDIR"
+  ; 此时安装向导已确定最终 $INSTDIR。异常崩溃可能让 node 脱离原进程树，
+  ; 因此在复制文件前再按完整路径清理一次；不会影响 Codex 等其它 Node 进程。
+  ; NSIS 是 32 位进程，直接调用 powershell.exe 会被重定向到 32 位版本，后者读取
+  ; 64 位 node.exe 的 Path 为空。Sysnative 明确进入 64 位 PowerShell 后才能精确匹配。
+  nsExec::Exec '$WINDIR\Sysnative\WindowsPowerShell\v1.0\powershell.exe -NoLogo -NoProfile -NonInteractive -WindowStyle Hidden -Command "Get-Process node -ErrorAction SilentlyContinue | Where-Object Path -EQ $\"$INSTDIR\node.exe$\" | Stop-Process -Force -ErrorAction SilentlyContinue"'
+  Pop $0
+  Sleep 400
   ; 递归打包整个应用目录（node.exe / node_modules / DLL / exe 等）
   File /r "${APP_SOURCE}\*"
 
