@@ -282,6 +282,12 @@ namespace DeepSeekHarness
         private Point resizeOrigin;
         private Rectangle resizeBaseBounds;
         private System.Windows.Forms.Timer resizeTimer;
+        // 窗口状态切换：记住最小化前的状态，托盘恢复时不再把最大化误还原成普通窗口。
+        private FormWindowState stateBeforeMinimize = FormWindowState.Normal;
+        private FormWindowState lastVisibleWindowState = FormWindowState.Normal;
+        // 最大化/还原会在一个消息周期内触发多次 Resize；合并为一次实际布局，
+        // 避免 WebView2 连续重设 Bounds 带来的抖动与黑边。
+        private bool windowLayoutPending;
         // 上一次同步给网页的最大化状态：-1 未知（新文档需要强制同步一次）
         private int maxStateSynced = -1;
         private Process serverProc;
@@ -295,6 +301,8 @@ namespace DeepSeekHarness
         private ToolStripMenuItem trayStatusItem;
         // 最近一次查到的可用更新（启动时静默检查发现后，点托盘气泡或界面按钮即可升级）
         private UpdateInfo pendingUpdate;
+        private UpdateInfo cachedUpdateInfo;
+        private DateTime cachedUpdateAt = DateTime.MinValue;
         // 更新流程状态：会同步给网页里的左下角更新按钮（idle/available/downloading/ready…）
         private string updatePhase = "idle";
         private int updatePercent;
@@ -313,7 +321,10 @@ namespace DeepSeekHarness
         // GitHub 的两个域名在网络不通时常常既连不上也不报错（请求一直挂着），
         // 界面就会永远停在「检查中…」。这里给每次请求都套上硬超时：
         // 清单 / API 各 12 秒（串行最坏 ~24 秒），再在外面整体兜一层（见 RunUpdateFlowAsync）。
-        private const int CheckTimeoutMs = 12000;
+        private const int CheckTimeoutMs = 8000;
+        private const int CheckFallbackDelayMs = 700;
+        private const int ManifestGraceMs = 500;
+        private const int UpdateCacheSeconds = 30;
         // 下载阶段：60 秒一点进度都没有就判定卡死并取消，避免「下载中 12%」挂一整天
         private const int DownloadStallMs = 60000;
 
@@ -868,6 +879,14 @@ namespace DeepSeekHarness
         private const int WM_NCLBUTTONDOWN = 0x00A1;
         private const int HTCAPTION = 2;
 
+        private const int DWMWA_USE_IMMERSIVE_DARK_MODE = 20;
+        private const int DWMWA_WINDOW_CORNER_PREFERENCE = 33;
+        private const int DWMWCP_ROUND = 2;
+
+        [System.Runtime.InteropServices.DllImport("dwmapi.dll")]
+        private static extern int DwmSetWindowAttribute(
+            IntPtr hwnd, int attribute, ref int value, int valueSize);
+
         [System.Runtime.InteropServices.DllImport("user32.dll")]
         [return: System.Runtime.InteropServices.MarshalAs(System.Runtime.InteropServices.UnmanagedType.Bool)]
         private static extern bool ReleaseCapture();
@@ -962,9 +981,32 @@ namespace DeepSeekHarness
             {
                 CreateParams cp = base.CreateParams;
                 cp.ClassStyle |= 0x00020000;                 // CS_DROPSHADOW
-                cp.Style |= 0x00020000 | 0x00080000;         // WS_MINIMIZEBOX | WS_SYSMENU
+                // 同时补齐 WS_MAXIMIZEBOX：Win+方向键、拖到屏幕边缘吸附、任务栏
+                // 最大化/还原以及从最大化标题栏拖下恢复，都按标准顶层窗口工作。
+                cp.Style |= 0x00010000 | 0x00020000 | 0x00080000;
                 return cp;
             }
+        }
+
+        protected override void OnHandleCreated(EventArgs e)
+        {
+            base.OnHandleCreated(e);
+            ApplyNativeWindowAppearance();
+        }
+
+        // Windows 11 使用系统圆角与深色阴影；旧版 Windows 不支持时静默回退。
+        private void ApplyNativeWindowAppearance()
+        {
+            try
+            {
+                int dark = 1;
+                DwmSetWindowAttribute(Handle, DWMWA_USE_IMMERSIVE_DARK_MODE,
+                    ref dark, sizeof(int));
+                int corners = DWMWCP_ROUND;
+                DwmSetWindowAttribute(Handle, DWMWA_WINDOW_CORNER_PREFERENCE,
+                    ref corners, sizeof(int));
+            }
+            catch { }
         }
 
         // v0.9.4：启动默认就是「全屏」——即最大化到当前显示器的工作区。
@@ -992,9 +1034,51 @@ namespace DeepSeekHarness
         protected override void OnResize(EventArgs e)
         {
             base.OnResize(e);
-            LayoutChrome();
-            LayoutContent();
-            SyncCaptionMaxState(); // 网页侧的最大化状态同步（边缘热区停用）
+            FormWindowState current = WindowState;
+            if (current == FormWindowState.Minimized)
+            {
+                if (lastVisibleWindowState != FormWindowState.Minimized)
+                    stateBeforeMinimize = lastVisibleWindowState;
+            }
+            else
+            {
+                lastVisibleWindowState = current;
+            }
+            ScheduleWindowLayout();
+        }
+
+        private void ScheduleWindowLayout()
+        {
+            if (IsDisposed || Disposing) return;
+            if (!IsHandleCreated)
+            {
+                PerformWindowLayout();
+                return;
+            }
+            if (windowLayoutPending) return;
+            windowLayoutPending = true;
+            try
+            {
+                BeginInvoke(new Action(delegate
+                {
+                    windowLayoutPending = false;
+                    if (!IsDisposed && !Disposing) PerformWindowLayout();
+                }));
+            }
+            catch { windowLayoutPending = false; }
+        }
+
+        private void PerformWindowLayout()
+        {
+            SuspendLayout();
+            try
+            {
+                LayoutChrome();
+                LayoutContent();
+                SyncCaptionMaxState();
+            }
+            // true 会立即执行一次 Dock/Anchor 布局；否则标题栏仍可能保留缩放前的宽度。
+            finally { ResumeLayout(true); }
         }
 
         // v0.9.0 起不再用贴边透明抓手做缩放。老方案的三个毛病（实测确认）：
@@ -1088,7 +1172,7 @@ namespace DeepSeekHarness
             btnMin = new CaptionButton(this, CaptionButton.Kind.Minimize);
             btnMax = new CaptionButton(this, CaptionButton.Kind.Maximize);
             btnClose = new CaptionButton(this, CaptionButton.Kind.Close);
-            btnMin.Click += delegate { WindowState = FormWindowState.Minimized; };
+            btnMin.Click += delegate { MinimizeWindow(); };
             btnMax.Click += delegate { ToggleMaximize(); };
             btnClose.Click += delegate { Close(); }; // 关窗即最小化到托盘，见 OnFormClosing
 
@@ -1124,25 +1208,43 @@ namespace DeepSeekHarness
         private void LayoutChrome()
         {
             if (titleBar == null || titleBar.IsDisposed) return;
+            // Dock 布局在 Resize 事件后才可能更新。直接以窗体客户区宽度为准，
+            // 防止窗口快速缩小时标题栏仍保留旧宽度，右侧三键被排到可视区外。
+            int availableWidth = Math.Max(0, ClientSize.Width);
+            if (titleBar.Width != availableWidth) titleBar.Width = availableWidth;
             int h = titleBar.Height;
             int bw = UI.CaptionButtonWidth;
             // 上下各留 4px、右侧留 EdgeGrip：标题带的边缘要能当缩放热区用
             // （窗口按钮如果贴着角，那几像素就会被按钮吃走，拖不到窗口边界）
             int bh = h - 8, bt = 4, right = EdgeGrip;
             if (btnClose != null && !btnClose.IsDisposed)
-                btnClose.Bounds = new Rectangle(titleBar.Width - right - bw, bt, bw, bh);
+            {
+                btnClose.Bounds = new Rectangle(Math.Max(0, availableWidth - right - bw), bt, bw, bh);
+                btnClose.Visible = true;
+                btnClose.BringToFront();
+            }
             if (btnMax != null && !btnMax.IsDisposed)
             {
-                btnMax.Bounds = new Rectangle(titleBar.Width - right - bw * 2, bt, bw, bh);
+                btnMax.Bounds = new Rectangle(Math.Max(0, availableWidth - right - bw * 2), bt, bw, bh);
+                btnMax.Visible = true;
+                btnMax.BringToFront();
                 btnMax.Invalidate(); // 最大化/还原时图标要切换
             }
             if (btnMin != null && !btnMin.IsDisposed)
-                btnMin.Bounds = new Rectangle(titleBar.Width - right - bw * 3, bt, bw, bh);
+            {
+                btnMin.Bounds = new Rectangle(Math.Max(0, availableWidth - right - bw * 3), bt, bw, bh);
+                btnMin.Visible = true;
+                btnMin.BringToFront();
+            }
 
             if (portBadge != null && !portBadge.IsDisposed)
             {
                 portBadge.Top = (h - portBadge.Height) / 2;
-                portBadge.Left = Math.Max(48, titleBar.Width - right - bw * 3 - portBadge.Width - 16);
+                int portLeft = availableWidth - right - bw * 3 - portBadge.Width - 16;
+                // 窄窗口优先保证标题和三个窗口按钮；空间不足时只隐藏端口文字。
+                int titleRight = titleLabel == null ? 48 : titleLabel.Right;
+                portBadge.Visible = portLeft > titleRight + 12;
+                if (portBadge.Visible) portBadge.Left = portLeft;
             }
         }
 
@@ -1214,8 +1316,10 @@ namespace DeepSeekHarness
         // 无边框窗口没有系统标题栏，鼠标按下时投递 HTCAPTION 交给系统处理拖动
         private void BeginDrag(MouseEventArgs e)
         {
-            if (e.Button == MouseButtons.Left && WindowState != FormWindowState.Maximized)
+            if (e.Button == MouseButtons.Left)
             {
+                // 补齐 WS_MAXIMIZEBOX 后，向系统发送 HTCAPTION 可以获得原生行为：
+                // 最大化窗口向下拖会先恢复，并保持鼠标抓取位置继续移动。
                 ReleaseCapture();
                 SendMessage(Handle, WM_NCLBUTTONDOWN, (IntPtr)HTCAPTION, IntPtr.Zero);
             }
@@ -1439,16 +1543,31 @@ namespace DeepSeekHarness
 
         private void ToggleMaximize()
         {
-            if (WindowState == FormWindowState.Maximized)
+            if (WindowState == FormWindowState.Minimized) return;
+            SuspendLayout();
+            try
             {
-                WindowState = FormWindowState.Normal;
+                if (WindowState == FormWindowState.Maximized)
+                {
+                    WindowState = FormWindowState.Normal;
+                }
+                else
+                {
+                    // 每次都按窗口当前所在显示器重算工作区，跨屏后不会盖住任务栏。
+                    try { MaximizedBounds = Screen.FromHandle(Handle).WorkingArea; } catch { }
+                    WindowState = FormWindowState.Maximized;
+                }
             }
-            else
-            {
-                // 无边框最大化默认会盖住任务栏，限定在工作区范围内
-                try { MaximizedBounds = Screen.FromHandle(Handle).WorkingArea; } catch { }
-                WindowState = FormWindowState.Maximized;
-            }
+            finally { ResumeLayout(true); }
+            ScheduleWindowLayout();
+        }
+
+        private void MinimizeWindow()
+        {
+            if (WindowState == FormWindowState.Minimized) return;
+            stateBeforeMinimize = WindowState == FormWindowState.Maximized
+                ? FormWindowState.Maximized : FormWindowState.Normal;
+            WindowState = FormWindowState.Minimized;
         }
 
         private async Task InitializeAsync()
@@ -2417,8 +2536,20 @@ namespace DeepSeekHarness
         // 从托盘恢复主窗口并置于前台。
         private void ShowForm()
         {
-            if (WindowState == FormWindowState.Minimized) WindowState = FormWindowState.Normal;
-            Show();
+            bool wasMinimized = WindowState == FormWindowState.Minimized;
+            if (!Visible) Show();
+            if (wasMinimized)
+            {
+                if (stateBeforeMinimize == FormWindowState.Maximized)
+                {
+                    try { MaximizedBounds = Screen.FromHandle(Handle).WorkingArea; } catch { }
+                    WindowState = FormWindowState.Maximized;
+                }
+                else WindowState = FormWindowState.Normal;
+            }
+            else if (WindowState == FormWindowState.Minimized)
+                WindowState = FormWindowState.Normal;
+            ScheduleWindowLayout();
             Activate();
             try { SetForegroundWindow(this.Handle); } catch { }
         }
@@ -2585,7 +2716,21 @@ namespace DeepSeekHarness
             {
                 // 保留已知的版本号：重新检查时界面上的蓝色胶囊不会先消失再出现（闪一下）
                 PublishUpdateState("checking", 0, pendingUpdate == null ? "" : pendingUpdate.Version, false);
-                UpdateInfo info = await FetchLatestReleaseAsync();
+                UpdateInfo info;
+                if (cachedUpdateInfo != null &&
+                    DateTime.UtcNow - cachedUpdateAt < TimeSpan.FromSeconds(UpdateCacheSeconds))
+                {
+                    info = cachedUpdateInfo;
+                }
+                else
+                {
+                    info = await FetchLatestReleaseAsync();
+                    if (info != null)
+                    {
+                        cachedUpdateInfo = info;
+                        cachedUpdateAt = DateTime.UtcNow;
+                    }
+                }
                 if (info == null)
                 {
                     PublishUpdateState("error", 0, "", true);
@@ -2685,6 +2830,7 @@ namespace DeepSeekHarness
                 "DeepSeekHarness", "Updates");
             Directory.CreateDirectory(dir);
             string file = Path.Combine(dir, "DeepSeekHarness-Setup-" + info.Version + ".exe");
+            string tempFile = file + ".download";
 
             PublishUpdateState("downloading", 0, info.Version, true);
             ProgressForm progress = WebUpdateUi ? null : new ProgressForm("正在下载更新 v" + info.Version);
@@ -2708,7 +2854,9 @@ namespace DeepSeekHarness
                 TaskCompletionSource<object> done = new TaskCompletionSource<object>();
                 wc.DownloadFileCompleted += delegate (object s, System.ComponentModel.AsyncCompletedEventArgs ev)
                 {
-                    if (ev.Error != null) done.TrySetException(ev.Error);
+                    if (ev.Cancelled)
+                        done.TrySetException(new TimeoutException("下载长时间没有进度，已取消。"));
+                    else if (ev.Error != null) done.TrySetException(ev.Error);
                     else done.TrySetResult(null);
                 };
                 // 看门狗：网络抽风时下载可能既不报错也不推进，一直停在「下载中 x%」。
@@ -2723,8 +2871,15 @@ namespace DeepSeekHarness
                     catch { }
                 }, null, 10000, 10000);
 
-                wc.DownloadFileAsync(new Uri(info.InstallerUrl), file);
+                try { if (File.Exists(tempFile)) File.Delete(tempFile); } catch { }
+                wc.DownloadFileAsync(new Uri(info.InstallerUrl), tempFile);
                 await done.Task;
+                long actualSize = new FileInfo(tempFile).Length;
+                if (info.InstallerSize > 0 && actualSize != info.InstallerSize)
+                    throw new InvalidDataException("安装包大小校验失败，预期 " +
+                        info.InstallerSize + " 字节，实际 " + actualSize + " 字节。");
+                if (File.Exists(file)) File.Delete(file);
+                File.Move(tempFile, file);
             }
             catch (Exception ex)
             {
@@ -2742,6 +2897,7 @@ namespace DeepSeekHarness
                 if (watchdog != null) { try { watchdog.Dispose(); } catch { } }
                 if (wc != null) { try { wc.Dispose(); } catch { } }
                 if (progress != null) { progress.Close(); progress.Dispose(); }
+                try { if (File.Exists(tempFile)) File.Delete(tempFile); } catch { }
             }
 
             downloadedInstaller = file;
@@ -2798,7 +2954,7 @@ namespace DeepSeekHarness
             catch { }
         }
 
-        // 取最新版信息：先读静态清单 latest.json，拿不到再回退 GitHub API。
+        // 取最新版信息：静态清单优先，但不再让 API 串行干等它完整超时。
         // 两者都用正则抽取字段，避免为此引入 JSON 依赖。
         // 关键：每一步都有超时（见 CheckTimeoutMs）—— 网络不通时 GitHub 的这两个域名
         // 常常既连不上也不报错，请求会一直挂着，界面上的「检查中…」就永远消不掉。
@@ -2806,14 +2962,51 @@ namespace DeepSeekHarness
         {
             try { ServicePointManager.SecurityProtocol |= SecurityProtocolType.Tls12; } catch { }
 
-            UpdateInfo info = null;
-            try { info = await WithTimeout(FetchManifestAsync(), CheckTimeoutMs); }
-            catch { info = null; }
-            if (info != null) return info;
+            Task<UpdateInfo> manifestTask = TryFetchManifestAsync();
+            Task headStart = Task.Delay(CheckFallbackDelayMs);
+            Task first = await Task.WhenAny(manifestTask, headStart);
+            if (first == manifestTask)
+            {
+                UpdateInfo earlyManifest = await manifestTask;
+                if (earlyManifest != null) return earlyManifest;
+            }
 
-            try { info = await WithTimeout(FetchApiAsync(), CheckTimeoutMs); }
-            catch { info = null; }
-            return info;
+            // 清单 700ms 内未返回或失败时启动 API，两条线路错峰并行。
+            Task<UpdateInfo> apiTask = TryFetchApiAsync();
+            if (manifestTask.IsCompleted)
+                return await apiTask;
+
+            Task winner = await Task.WhenAny(manifestTask, apiTask);
+            if (winner == manifestTask)
+            {
+                UpdateInfo manifest = await manifestTask;
+                if (manifest != null) return manifest;
+                return await apiTask;
+            }
+
+            UpdateInfo api = await apiTask;
+            if (api == null) return await manifestTask;
+
+            // API 先成功时再给清单很短的宽限时间；拿得到清单就保留 minimumVersion 等元数据。
+            Task grace = await Task.WhenAny(manifestTask, Task.Delay(ManifestGraceMs));
+            if (grace == manifestTask)
+            {
+                UpdateInfo manifest = await manifestTask;
+                if (manifest != null) return manifest;
+            }
+            return api;
+        }
+
+        private static async Task<UpdateInfo> TryFetchManifestAsync()
+        {
+            try { return await WithTimeout(FetchManifestAsync(), CheckTimeoutMs); }
+            catch { return null; }
+        }
+
+        private static async Task<UpdateInfo> TryFetchApiAsync()
+        {
+            try { return await WithTimeout(FetchApiAsync(), CheckTimeoutMs); }
+            catch { return null; }
         }
 
         // 给任意任务套一层硬超时：超时即抛出，不再无限等待。
@@ -2875,6 +3068,11 @@ namespace DeepSeekHarness
             Match setup = Regex.Match(json, "\"installer\"\\s*:\\s*\\{[^{}]*\"url\"\\s*:\\s*\"([^\"]+)\"");
             if (!setup.Success) setup = Regex.Match(json, "\"installerUrl\"\\s*:\\s*\"([^\"]+)\"");
             info.InstallerUrl = setup.Success ? setup.Groups[1].Value : null;
+            Match setupSize = Regex.Match(json,
+                "\"installer\"\\s*:\\s*\\{[^{}]*\"size\"\\s*:\\s*(\\d+)");
+            long installerSize;
+            info.InstallerSize = setupSize.Success && long.TryParse(setupSize.Groups[1].Value, out installerSize)
+                ? installerSize : 0;
 
             Match zip = Regex.Match(json, "\"portable\"\\s*:\\s*\\{[^{}]*\"url\"\\s*:\\s*\"([^\"]+)\"");
             if (!zip.Success) zip = Regex.Match(json, "\"portableUrl\"\\s*:\\s*\"([^\"]+)\"");
@@ -2955,6 +3153,7 @@ namespace DeepSeekHarness
             public string Version = "";
             public string Notes = "";
             public string InstallerUrl;
+            public long InstallerSize;
             public string ZipUrl;
             public string PageUrl = ReleasesPageUrl;
             // 最低可用版本：低于它的客户端被要求必须升级（最低版本本身不算必须升级）
