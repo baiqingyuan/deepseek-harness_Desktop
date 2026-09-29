@@ -1,19 +1,19 @@
 ﻿# build.ps1 - 一键构建 DeepSeek Harness Desktop 便携版
 # 用法: ./build.ps1  （需要联网；Windows PowerShell / pwsh）
 param(
-    # dsh 版本：默认锁定官方 npm `latest`（稳定通道）。
-    # 也可填 'latest' / 'alpha' 由 npm dist-tag 自动解析（alpha = 官方 master 上的预发布线）。
-    # 2026-09-28: official latest channel now resolves to 0.1.7-rc.2.
+    # dsh 版本：默认锁定已通过桌面壳兼容验证的官方预发布版。
+    # 也可填 'latest' / 'next' / 'alpha' 由 npm dist-tag 自动解析。
+    # 2026-09-29: official GitHub v0.2.0-rc.1 is published on npm's next channel.
     # Keep a concrete version here so release builds remain reproducible.
-    [string]$DshVersion = "0.1.7-rc.2",
+    [string]$DshVersion = "0.2.0-rc.1",
     [string]$WebView2Version = "1.0.4129.50",
     [string]$NodeVersion = "v24.21.0",
-    [string]$Version = "0.9.10"
+    [string]$Version = "0.9.11"
 )
 $ErrorActionPreference = 'Stop'
 
-# 把 latest / alpha 这样的 dist-tag 解析成具体版本号后再锁定，保证可复现。
-if ($DshVersion -eq 'latest' -or $DshVersion -eq 'alpha') {
+# 把 latest / next / alpha 这样的 dist-tag 解析成具体版本号后再锁定，保证可复现。
+if ($DshVersion -eq 'latest' -or $DshVersion -eq 'next' -or $DshVersion -eq 'alpha') {
     $tag = $DshVersion
     $resolved = $null
     try {
@@ -21,7 +21,7 @@ if ($DshVersion -eq 'latest' -or $DshVersion -eq 'alpha') {
     } catch { }
     if ($resolved) { $resolved = ([string]$resolved).Trim() }
     if (-not $resolved -or $resolved -notmatch '^\d') {
-        throw "无法从 npm 解析 @deepseek-ai/dsh@$tag 的版本号，请显式指定 -DshVersion（例如 0.1.7-rc.2）。"
+        throw "无法从 npm 解析 @deepseek-ai/dsh@$tag 的版本号，请显式指定 -DshVersion（例如 0.2.0-rc.1）。"
     }
     $DshVersion = $resolved
     Write-Host "dsh dist-tag '$tag' -> $DshVersion"
