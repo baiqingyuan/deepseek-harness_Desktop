@@ -3,12 +3,12 @@
 param(
     # dsh 版本：默认锁定已通过桌面壳兼容验证的官方预发布版。
     # 也可填 'latest' / 'next' / 'alpha' 由 npm dist-tag 自动解析。
-    # 2026-09-29: official GitHub v0.2.0-rc.1 is published on npm's next channel.
+    # 2026-10-04: official npm latest and next resolve to 0.2.0-rc.2.
     # Keep a concrete version here so release builds remain reproducible.
-    [string]$DshVersion = "0.2.0-rc.1",
+    [string]$DshVersion = "0.2.0-rc.2",
     [string]$WebView2Version = "1.0.4129.50",
     [string]$NodeVersion = "v24.21.0",
-    [string]$Version = "0.9.11"
+    [string]$Version = "0.9.12"
 )
 $ErrorActionPreference = 'Stop'
 
@@ -21,7 +21,7 @@ if ($DshVersion -eq 'latest' -or $DshVersion -eq 'next' -or $DshVersion -eq 'alp
     } catch { }
     if ($resolved) { $resolved = ([string]$resolved).Trim() }
     if (-not $resolved -or $resolved -notmatch '^\d') {
-        throw "无法从 npm 解析 @deepseek-ai/dsh@$tag 的版本号，请显式指定 -DshVersion（例如 0.2.0-rc.1）。"
+        throw "无法从 npm 解析 @deepseek-ai/dsh@$tag 的版本号，请显式指定 -DshVersion（例如 0.2.0-rc.2）。"
     }
     $DshVersion = $resolved
     Write-Host "dsh dist-tag '$tag' -> $DshVersion"
