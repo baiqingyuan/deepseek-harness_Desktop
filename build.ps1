@@ -8,7 +8,7 @@ param(
     [string]$DshVersion = "0.2.0-rc.2",
     [string]$WebView2Version = "1.0.4129.50",
     [string]$NodeVersion = "v24.21.0",
-    [string]$Version = "0.9.12"
+    [string]$Version = "0.9.13"
 )
 $ErrorActionPreference = 'Stop'
 

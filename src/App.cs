@@ -250,6 +250,70 @@ namespace DeepSeekHarness
         }
     }
 
+    internal sealed class DesktopPreferences
+    {
+        internal Rectangle Bounds;
+        internal bool HasBounds;
+        internal bool Maximized = true;
+        internal double Zoom = 1.0;
+
+        internal static string FilePath
+        {
+            get { return Path.Combine(Environment.GetFolderPath(Environment.SpecialFolder.LocalApplicationData),
+                "DeepSeekHarness", "desktop-preferences.txt"); }
+        }
+
+        internal static DesktopPreferences Load(string path)
+        {
+            DesktopPreferences value = new DesktopPreferences();
+            try
+            {
+                string[] parts = File.ReadAllText(path).Trim().Split('|');
+                int x, y, width, height;
+                double zoom;
+                if (parts.Length != 6 || !int.TryParse(parts[0], out x) || !int.TryParse(parts[1], out y) ||
+                    !int.TryParse(parts[2], out width) || !int.TryParse(parts[3], out height) ||
+                    width < 100 || height < 100 || width > 20000 || height > 20000 ||
+                    x < -100000 || x > 100000 || y < -100000 || y > 100000 ||
+                    (parts[4] != "0" && parts[4] != "1") ||
+                    !double.TryParse(parts[5], System.Globalization.NumberStyles.Float,
+                        System.Globalization.CultureInfo.InvariantCulture, out zoom) ||
+                    double.IsNaN(zoom) || double.IsInfinity(zoom)) return value;
+                value.Bounds = new Rectangle(x, y, width, height);
+                value.HasBounds = true;
+                value.Maximized = parts[4] == "1";
+                value.Zoom = Math.Max(0.75, Math.Min(1.5, zoom));
+            }
+            catch { }
+            return value;
+        }
+
+        internal void Save(string path)
+        {
+            if (!HasBounds) return;
+            try
+            {
+                Directory.CreateDirectory(Path.GetDirectoryName(path));
+                string data = Bounds.X + "|" + Bounds.Y + "|" + Bounds.Width + "|" + Bounds.Height + "|" +
+                    (Maximized ? "1" : "0") + "|" + Zoom.ToString(System.Globalization.CultureInfo.InvariantCulture);
+                string temp = path + ".tmp";
+                File.WriteAllText(temp, data);
+                if (File.Exists(path)) File.Replace(temp, path, null);
+                else File.Move(temp, path);
+            }
+            catch (Exception ex) { Log.Error("保存窗口偏好", ex); }
+        }
+
+        internal static Rectangle FitBounds(Rectangle bounds, Rectangle workArea, Size minimum)
+        {
+            int width = Math.Min(workArea.Width, Math.Max(minimum.Width, bounds.Width));
+            int height = Math.Min(workArea.Height, Math.Max(minimum.Height, bounds.Height));
+            int x = Math.Max(workArea.Left, Math.Min(bounds.Left, workArea.Right - width));
+            int y = Math.Max(workArea.Top, Math.Min(bounds.Top, workArea.Bottom - height));
+            return new Rectangle(x, y, width, height);
+        }
+    }
+
     internal sealed class MainForm : Form
     {
         private const int DefaultPort = 3080;
@@ -263,7 +327,7 @@ namespace DeepSeekHarness
         private WebView2 webView;
         // dsh 每次启动都会生成一次性 token，并把带 token 的 URL 打到 stdout；
         // 桌面壳必须拿到它才能通过新版 Web 控制台的浏览器鉴权（否则所有 /api 调用 401）。
-        private readonly TaskCompletionSource<string> readyUrlSource = new TaskCompletionSource<string>();
+        private TaskCompletionSource<string> readyUrlSource = new TaskCompletionSource<string>();
         // 本地服务在窗体构造完成后立即后台预热；WebView2 环境则在 OnLoad 创建。
         // Shown 事件只负责接管这两个已经在运行的任务，缩短首屏等待。
         private Task startupServerLaunchTask;
@@ -275,6 +339,14 @@ namespace DeepSeekHarness
         private PictureBox appIcon;
         private Panel loadingCard;
         private Label loadingText;
+        private Label loadingTitle;
+        private ProgressBar loadingProgress;
+        private bool initializing;
+        private bool recovering;
+        private bool recoveryVisible;
+        private readonly DesktopPreferences preferences = DesktopPreferences.Load(DesktopPreferences.FilePath);
+        private bool windowPlacementReady;
+        private ToolTip chromeHints;
         private CaptionButton btnMin, btnMax, btnClose;
         // 手动缩放状态（无边框窗口没有系统边框，缩放自己驱动，见 StartResizeFromWeb）
         private bool resizing;
@@ -297,7 +369,7 @@ namespace DeepSeekHarness
         private NotifyIcon trayIcon;
         private bool trayExit;
         // 本地 dsh 服务是否仍存活（托盘菜单状态下启用；服务挂掉后菜单里标为未运行）
-        private volatile bool serverAlive = true;
+        private volatile bool serverAlive;
         private ToolStripMenuItem trayStatusItem;
         // 最近一次查到的可用更新（启动时静默检查发现后，点托盘气泡或界面按钮即可升级）
         private UpdateInfo pendingUpdate;
@@ -340,6 +412,15 @@ namespace DeepSeekHarness
  if (window.__dshUpdateReady) return;
  if (window.top !== window) return;
  window.__dshUpdateReady = true;
+ // WebView 获得焦点时，键盘消息由浏览器处理；明确转发桌面快捷键。
+ document.addEventListener('keydown', function(e){
+  if(!e.ctrlKey || e.altKey || e.metaKey) return;
+  var action = e.shiftKey && e.key.toLowerCase()==='m' ? 'menu' :
+   e.key==='+' || e.key==='=' ? 'in' : e.key==='-' ? 'out' : e.key==='0' ? 'reset' : '';
+  if(!action) return;
+  e.preventDefault(); e.stopPropagation();
+  if(!e.repeat) window.chrome.webview.postMessage('dsh-desktop-action:'+action);
+ }, true);
  // 更新入口分两处（v0.9.5）：
  //   1) 「检查更新」= 通用设置列表**最底部**的一条设置项，样式跟其他小条一致：
 //      左侧标题 + 说明文字，右侧一颗独立按钮（检查 / 更新 / 安装 / 重试），
@@ -1010,7 +1091,7 @@ namespace DeepSeekHarness
             catch { }
         }
 
-        // v0.9.4：启动默认就是「全屏」——即最大化到当前显示器的工作区。
+        // 首次使用最大化；后续尊重用户上次的窗口位置和大小。
         // 放在 OnLoad 而不是构造函数里：无边框窗口的 MaximizedBounds 必须等窗口句柄
         // 存在、能问出所在显示器之后才能设；而 OnLoad 早于第一次绘制，用户看不到
         // 「先 1280x820 再跳大」的闪一下。
@@ -1020,8 +1101,15 @@ namespace DeepSeekHarness
             base.OnLoad(e);
             try
             {
+                if (preferences.HasBounds)
+                {
+                    StartPosition = FormStartPosition.Manual;
+                    Bounds = DesktopPreferences.FitBounds(preferences.Bounds,
+                        Screen.FromRectangle(preferences.Bounds).WorkingArea, MinimumSize);
+                }
                 MaximizedBounds = Screen.FromHandle(Handle).WorkingArea;
-                WindowState = FormWindowState.Maximized;
+                WindowState = preferences.Maximized ? FormWindowState.Maximized : FormWindowState.Normal;
+                windowPlacementReady = true;
             }
             catch (Exception ex)
             {
@@ -1046,6 +1134,48 @@ namespace DeepSeekHarness
                 lastVisibleWindowState = current;
             }
             ScheduleWindowLayout();
+        }
+
+        private void SaveDesktopPreferences()
+        {
+            if (!windowPlacementReady) return;
+            Rectangle normal = WindowState == FormWindowState.Normal ? Bounds : RestoreBounds;
+            if (normal.Width >= 100 && normal.Height >= 100)
+            {
+                preferences.Bounds = normal;
+                preferences.HasBounds = true;
+            }
+            preferences.Maximized = (WindowState == FormWindowState.Minimized
+                ? stateBeforeMinimize : WindowState) == FormWindowState.Maximized;
+            preferences.Save(DesktopPreferences.FilePath);
+        }
+
+        private void ShowDesktopMenu()
+        {
+            if (trayIcon == null || trayIcon.ContextMenuStrip == null) return;
+            trayIcon.ContextMenuStrip.Show(this, new Point(12, ContentTop));
+        }
+
+        private void ChangeZoom(double delta, bool reset)
+        {
+            double zoom = reset ? 1.0 : preferences.Zoom + delta;
+            preferences.Zoom = Math.Round(Math.Max(0.75, Math.Min(1.5, zoom)), 2);
+            if (webView != null && !webView.IsDisposed) webView.ZoomFactor = preferences.Zoom;
+            SaveDesktopPreferences();
+        }
+
+        protected override bool ProcessCmdKey(ref Message msg, Keys keyData)
+        {
+            if (keyData == (Keys.Control | Keys.Shift | Keys.M))
+            { ShowDesktopMenu(); return true; }
+            if (keyData == (Keys.Control | Keys.Oemplus) || keyData == (Keys.Control | Keys.Shift | Keys.Oemplus)
+                || keyData == (Keys.Control | Keys.Add))
+            { ChangeZoom(0.1, false); return true; }
+            if (keyData == (Keys.Control | Keys.OemMinus) || keyData == (Keys.Control | Keys.Subtract))
+            { ChangeZoom(-0.1, false); return true; }
+            if (keyData == (Keys.Control | Keys.D0) || keyData == (Keys.Control | Keys.NumPad0))
+            { ChangeZoom(0, true); return true; }
+            return base.ProcessCmdKey(ref msg, keyData);
         }
 
         private void ScheduleWindowLayout()
@@ -1134,11 +1264,14 @@ namespace DeepSeekHarness
                 Top = (UI.TitleBarHeight - 16) / 2,
                 SizeMode = PictureBoxSizeMode.StretchImage,
                 BackColor = UI.Bar,
-                Cursor = Cursors.Default // 子控件显式用默认光标，别继承标题带上边缘的缩放光标
+                Cursor = Cursors.Hand,
+                AccessibleName = "桌面菜单",
+                AccessibleRole = AccessibleRole.PushButton
             };
             RefreshAppIcon(); // 图标帧按控件实际像素宽度取（高 DPI 下 16pt 会被放大成 20/24px）
-            appIcon.MouseDown += drag;
-            appIcon.MouseDoubleClick += dbl;
+            appIcon.Click += delegate { ShowDesktopMenu(); };
+            chromeHints = new ToolTip();
+            chromeHints.SetToolTip(appIcon, "桌面菜单 · Ctrl+Shift+M");
 
             // 左侧：标题（不再居中，跟随 Windows 习惯靠左）
             titleLabel = new Label
@@ -1176,6 +1309,12 @@ namespace DeepSeekHarness
             btnMin.Click += delegate { MinimizeWindow(); };
             btnMax.Click += delegate { ToggleMaximize(); };
             btnClose.Click += delegate { Close(); }; // 关窗即最小化到托盘，见 OnFormClosing
+            btnMin.AccessibleName = "最小化";
+            btnMax.AccessibleName = "最大化 / 还原";
+            btnClose.AccessibleName = "收起到托盘";
+            chromeHints.SetToolTip(btnMin, "最小化到任务栏");
+            chromeHints.SetToolTip(btnMax, "最大化 / 还原");
+            chromeHints.SetToolTip(btnClose, "收起到托盘 · 完全退出请使用桌面菜单");
 
             // 先加的在 z-order 更靠上，按钮不会被标题文字遮挡（v0.7.0 就是被遮挡才点不到）
             titleBar.Controls.Add(btnClose);
@@ -1459,7 +1598,7 @@ namespace DeepSeekHarness
 
             // 高度必须给够：12pt 加粗 + 中文回退字体（微软雅黑）一行约 24px，
             // 之前 Height=26 时 Label 按 rect 裁剪，实测底部被切掉约 6px（用户截图里的「大字被压掉一截」）。
-            Label title = new Label
+            loadingTitle = new Label
             {
                 Text = "正在启动 DeepSeek Harness…",
                 Font = UI.MakeFont(12f, FontStyle.Bold),
@@ -1479,7 +1618,7 @@ namespace DeepSeekHarness
             };
 
             // 走马灯（系统原生不确定进度条），比自绘转圈更稳也比纯文字更有反馈
-            ProgressBar bar = new ProgressBar
+            loadingProgress = new ProgressBar
             {
                 Left = 40, Top = 104, Width = 340, Height = 6,
                 Style = ProgressBarStyle.Marquee,
@@ -1496,9 +1635,9 @@ namespace DeepSeekHarness
                 BackColor = UI.Card
             };
 
-            card.Controls.Add(title);
+            card.Controls.Add(loadingTitle);
             card.Controls.Add(loadingText);
-            card.Controls.Add(bar);
+            card.Controls.Add(loadingProgress);
             card.Controls.Add(version);
             loadingCard.Controls.Add(card);
             loadingCard.Resize += delegate { CenterLoadingCard(card); };
@@ -1528,7 +1667,7 @@ namespace DeepSeekHarness
         {
             try
             {
-                if (loadingText != null && !loadingText.IsDisposed)
+                if (loadingText != null && !loadingText.IsDisposed && loadingText.Text != text)
                     loadingText.Text = text;
             }
             catch { }
@@ -1540,6 +1679,103 @@ namespace DeepSeekHarness
             try { Controls.Remove(loadingCard); loadingCard.Dispose(); } catch { }
             loadingCard = null;
             loadingText = null;
+            loadingTitle = null;
+            loadingProgress = null;
+        }
+
+        private void ShowRecoveryPane(string summary)
+        {
+            if (shuttingDown || IsDisposed) return;
+            recoveryVisible = true;
+            if (webView != null) webView.Visible = false;
+            RemoveLoadingPlaceholder();
+            BuildLoadingPlaceholder();
+            Panel card = (Panel)loadingCard.Controls[0];
+            card.Size = new Size(540, 270);
+            loadingTitle.Text = "连接暂时中断";
+            loadingTitle.SetBounds(20, 22, 500, 38);
+            loadingText.Text = summary + "\r\n你可以重试连接，或打开诊断日志查看原因。";
+            loadingText.SetBounds(24, 65, 492, 86);
+            loadingProgress.Visible = false;
+            foreach (Control child in card.Controls)
+                if (child != loadingTitle && child != loadingText && child != loadingProgress)
+                    child.Visible = false;
+            Button retry = RecoveryButton("重试连接", 30, 165);
+            retry.BackColor = Color.FromArgb(63, 103, 255);
+            retry.ForeColor = Color.White;
+            retry.FlatAppearance.BorderSize = 0;
+            retry.Click += async delegate { await RecoverAsync(false); };
+            bool canBrowse = serverAlive && !string.IsNullOrEmpty(readyUrl);
+            Button browser = RecoveryButton(canBrowse ? "浏览器打开" : "修复安装", 188, 165);
+            browser.Click += delegate { if (canBrowse) OpenLocalSite(); else OpenReleasesPage(); };
+            Button logs = RecoveryButton("查看诊断", 346, 165);
+            logs.Click += delegate { OpenDiagnosticsFolder(); };
+            card.Controls.Add(retry);
+            card.Controls.Add(browser);
+            card.Controls.Add(logs);
+            Label hint = new Label { Text = "会话记录仍保留在本机；文件缺失时可从桌面菜单打开下载页面修复安装。",
+                ForeColor = UI.LabelSecondary, BackColor = UI.Card, Font = UI.MakeFont(8.5f),
+                Left = 24, Top = 220, Width = 492, Height = 35, TextAlign = ContentAlignment.MiddleCenter };
+            card.Controls.Add(hint);
+            CenterLoadingCard(card);
+            LayoutContent();
+            loadingCard.BringToFront();
+        }
+
+        private static Button RecoveryButton(string text, int left, int top)
+        {
+            return new Button { Text = text, Left = left, Top = top, Width = 144, Height = 36,
+                FlatStyle = FlatStyle.Flat, BackColor = UI.Card, ForeColor = UI.Label,
+                Font = UI.MakeFont(9f), Cursor = Cursors.Hand, UseVisualStyleBackColor = false };
+        }
+
+        private static void OpenDiagnosticsFolder()
+        {
+            try
+            {
+                Directory.CreateDirectory(Log.DirectoryPath);
+                Process.Start(new ProcessStartInfo(Log.DirectoryPath) { UseShellExecute = true });
+            }
+            catch (Exception ex) { Log.Error("打开诊断目录", ex); }
+        }
+
+        private async Task RecoverAsync(bool restartService)
+        {
+            if (recovering || initializing || shuttingDown) return;
+            if (restartService && serverAlive && MessageBox.Show(this,
+                "重启连接会中断正在执行的任务，已保存的会话记录会保留。确定继续吗？",
+                "重启本地连接", MessageBoxButtons.YesNo, MessageBoxIcon.Question) != DialogResult.Yes) return;
+            recovering = true;
+            recoveryVisible = false;
+            try
+            {
+                RemoveLoadingPlaceholder();
+                BuildLoadingPlaceholder();
+                LayoutContent();
+                if (webView != null)
+                {
+                    Controls.Remove(webView);
+                    webView.Dispose();
+                    webView = null;
+                }
+                if (restartService || !serverAlive)
+                {
+                    if (startupServerLaunchTask != null)
+                        try { await startupServerLaunchTask; } catch { }
+                    await Task.Run(new Action(StopServer));
+                    if (shuttingDown) return;
+                    readyUrlSource = new TaskCompletionSource<string>();
+                    readyUrl = null;
+                    diagnosticsHint = null;
+                    serverAlive = false;
+                    lock (errorTail) { errorTail.Clear(); }
+                    startupServerLaunchTask = Task.Run(new Action(PrepareAndLaunchServer));
+                }
+                navWarned = false;
+                startupEnvironmentTask = PrepareWebViewEnvironmentAsync();
+                await InitializeAsync();
+            }
+            finally { recovering = false; }
         }
 
         private void ToggleMaximize()
@@ -1573,6 +1809,8 @@ namespace DeepSeekHarness
 
         private async Task InitializeAsync()
         {
+            if (initializing || shuttingDown) return;
+            initializing = true;
             try
             {
                 // 启动提速的关键：本地服务启动与 WebView2 运行时初始化同时进行。
@@ -1583,6 +1821,8 @@ namespace DeepSeekHarness
 
                 string startUrl = await serverTask;
                 if (shuttingDown) return;
+                serverAlive = true;
+                SetLoadingText("本地连接已就绪，正在打开界面…");
                 UpdatePortBadge();
                 await InitializeWebViewAsync(startUrl, envTask);
                 if (!string.IsNullOrEmpty(portNotice)) ShowBalloon(portNotice, ToolTipIcon.Info);
@@ -1595,11 +1835,16 @@ namespace DeepSeekHarness
                 try { File.WriteAllText(Path.Combine(baseDir, "dsh-app-error.log"), detail); } catch { }
                 if (!shuttingDown && !IsDisposed)
                 {
-                    MessageBox.Show("DeepSeek Harness 启动失败：\r\n\r\n" + ex.Message + ErrorTailText(),
-                        "DeepSeek Harness", MessageBoxButtons.OK, MessageBoxIcon.Error);
+                    Log.Error("启动本地连接", ex);
+                    string summary = ex.Message;
+                    if (!File.Exists(nodePath) || !File.Exists(dshPath))
+                        summary = "启动文件不完整，请通过修复安装重新下载桌面版。";
+                    int newline = summary.IndexOfAny(new char[] { '\r', '\n' });
+                    if (newline >= 0) summary = summary.Substring(0, newline);
+                    ShowRecoveryPane(summary.Length > 200 ? summary.Substring(0, 200) : summary);
                 }
-                BeginInvoke(new Action(RequestExit));
             }
+            finally { initializing = false; }
         }
 
         // 提前把 WebView2 运行时拉起来（与服务启动并行），拿到环境后等真正建控件时再 attach
@@ -1631,12 +1876,7 @@ namespace DeepSeekHarness
             {
                 if (!await EnsureWebView2RuntimeAsync())
                 {
-                    if (!shuttingDown && !IsDisposed)
-                        MessageBox.Show(
-                            "未检测到 WebView2 运行时，应用无法启动。\n请先从 https://aka.ms/webview2 安装后重试。",
-                            "DeepSeek Harness", MessageBoxButtons.OK, MessageBoxIcon.Error);
-                    BeginInvoke(new Action(RequestExit));
-                    return;
+                    throw new Exception("需要 WebView2 运行时才能显示界面。安装后点击重试连接，或在浏览器打开。");
                 }
             }
 
@@ -1738,6 +1978,7 @@ namespace DeepSeekHarness
                     Math.Max(0, ClientSize.Height - ContentTop));
 
                 await view.EnsureCoreWebView2Async(env);
+                view.ZoomFactor = preferences.Zoom;
 
                 // 网页侧注入：设置面板里的「检查更新」行 + 侧边栏那颗「有新版本」蓝色胶囊
                 // （都挂在 document.body 上）+ 边缘缩放热区 + 主题色上报。窗口按钮、标题带
@@ -1791,6 +2032,18 @@ namespace DeepSeekHarness
             string msg = null;
             try { msg = e.TryGetWebMessageAsString(); } catch { }
             if (string.IsNullOrEmpty(msg)) return;
+            if (msg.IndexOf("dsh-desktop-action:", StringComparison.Ordinal) == 0)
+            {
+                string action = msg.Substring(19);
+                if (!IsDisposed) BeginInvoke(new Action(delegate
+                {
+                    if (action == "menu") ShowDesktopMenu();
+                    else if (action == "in") ChangeZoom(0.1, false);
+                    else if (action == "out") ChangeZoom(-0.1, false);
+                    else if (action == "reset") ChangeZoom(0, true);
+                }));
+                return;
+            }
             if (msg.IndexOf("dsh-update-open", StringComparison.Ordinal) >= 0)
             {
                 if (IsDisposed) return;
@@ -1968,20 +2221,22 @@ namespace DeepSeekHarness
 
         private void OnNavigationCompleted(object sender, CoreWebView2NavigationCompletedEventArgs e)
         {
+            if (webView == null || !ReferenceEquals(sender, webView.CoreWebView2) ||
+                e.WebErrorStatus == CoreWebView2WebErrorStatus.OperationCanceled) return;
             // DOMContentLoaded 通常更早；这里作为静态页/旧运行时的成功兜底。
-            if (e.IsSuccess) RevealWebView();
+            if (e.IsSuccess) { navWarned = false; recoveryVisible = false; RevealWebView(); }
             if (!e.IsSuccess && !shuttingDown && !navWarned)
             {
                 navWarned = true;
-                BeginInvoke(new Action(() =>
-                    MessageBox.Show("无法加载 DeepSeek Harness 界面，请检查本地服务是否正常运行。",
-                        "DeepSeek Harness", MessageBoxButtons.OK, MessageBoxIcon.Warning)));
+                Log.Error("加载界面", new Exception(e.WebErrorStatus.ToString()));
+                BeginInvoke(new Action(() => ShowRecoveryPane("暂时无法打开界面，请重试本地连接。")));
             }
         }
 
         private void OnDomContentLoaded(object sender, CoreWebView2DOMContentLoadedEventArgs e)
         {
-            RevealWebView();
+            if (webView == null || !ReferenceEquals(sender, webView.CoreWebView2)) return;
+            if (!recoveryVisible) RevealWebView();
         }
 
         // 首屏 DOM 已经可绘制后再一次性交接原生占位与 WebView，减少白屏和闪烁。
@@ -2073,7 +2328,7 @@ namespace DeepSeekHarness
 
             serverProc.OutputDataReceived += delegate (object s, DataReceivedEventArgs ev)
             {
-                TryCaptureReadyUrl(ev.Data);
+                if (ReferenceEquals(s, serverProc)) TryCaptureReadyUrl(ev.Data);
             };
             serverProc.ErrorDataReceived += delegate (object s, DataReceivedEventArgs ev)
             {
@@ -2149,9 +2404,10 @@ namespace DeepSeekHarness
                 Task completed = await Task.WhenAny(readyUrlSource.Task, tick);
                 if (completed == readyUrlSource.Task) return await readyUrlSource.Task;
 
-                // 文案固定，不显示跳秒；只在仍未就绪时刷新。
+                // 较慢的首次启动给出说明，避免用户以为应用卡住。
                 if (!shuttingDown && !IsDisposed)
-                    BeginInvoke(new Action(() => SetLoadingText("正在启动本地服务，请稍候…")));
+                    SetLoadingText(DateTime.UtcNow - start > TimeSpan.FromSeconds(15)
+                        ? "首次启动或升级后需要准备缓存，请稍候…" : "正在准备本地连接…");
             }
         }
 
@@ -2159,15 +2415,16 @@ namespace DeepSeekHarness
         private void OnServerExited(object sender, EventArgs e)
         {
             // 启动阶段失败由 InitializeAsync 的错误弹窗负责，这里只管「已经用起来之后又挂了」
-            if (shuttingDown || webView == null) return;
+            if (!ReferenceEquals(sender, serverProc) || shuttingDown || recovering) return;
             serverAlive = false;
+            if (initializing || webView == null) return;
             try
             {
                 BeginInvoke(new Action(() =>
                 {
-                    if (shuttingDown || IsDisposed) return;
-                    ShowBalloon("本地 dsh 服务已退出，界面将无法继续使用。\n请通过托盘图标「真正退出」后重新启动应用。",
-                        ToolTipIcon.Warning);
+                    if (shuttingDown || IsDisposed || initializing || recovering || !ReferenceEquals(sender, serverProc)) return;
+                    Log.Error("本地服务中断", new Exception(ErrorTailText()));
+                    ShowRecoveryPane("本地连接意外断开，点击重试即可重新连接。");
                 }));
             }
             catch { }
@@ -2261,6 +2518,7 @@ namespace DeepSeekHarness
         // 避免误关后重开又要等启动。静默收进托盘，不再弹系统气泡提示（用户反馈太吵）。
         protected override void OnFormClosing(FormClosingEventArgs e)
         {
+            SaveDesktopPreferences();
             if (!trayExit && e.CloseReason == CloseReason.UserClosing)
             {
                 e.Cancel = true;
@@ -2279,6 +2537,7 @@ namespace DeepSeekHarness
         protected override void OnFormClosed(FormClosedEventArgs e)
         {
             if (trayIcon != null) { trayIcon.Visible = false; trayIcon.Dispose(); trayIcon = null; }
+            if (chromeHints != null) { chromeHints.Dispose(); chromeHints = null; }
             base.OnFormClosed(e);
         }
 
@@ -2337,7 +2596,7 @@ namespace DeepSeekHarness
                 }
             };
 
-            var head = new ToolStripMenuItem("DeepSeek Harness");
+            var head = new ToolStripMenuItem("DeepSeek Harness · v" + AppInfo.Version);
             head.Tag = "head";
             head.Font = new Font(UI.FontName, 9.5f, FontStyle.Bold, GraphicsUnit.Point);
             head.Enabled = false;
@@ -2365,9 +2624,39 @@ namespace DeepSeekHarness
             browse.Image = TrayGlyph("globe");
             browse.Click += (s, ev) => OpenLocalSite();
 
+            var restart = new ToolStripMenuItem("重启本地连接…");
+            restart.Image = TrayGlyph("refresh");
+            restart.Click += async (s, ev) => await RecoverAsync(true);
+            var diagnostics = new ToolStripMenuItem("查看诊断日志");
+            diagnostics.Image = TrayGlyph("info");
+            diagnostics.Click += (s, ev) => OpenDiagnosticsFolder();
+            var zoom = new ToolStripMenuItem("界面大小");
+            var zoomIn = new ToolStripMenuItem("放大　Ctrl + +");
+            zoomIn.Click += delegate { ChangeZoom(0.1, false); };
+            var zoomOut = new ToolStripMenuItem("缩小　Ctrl + -");
+            zoomOut.Click += delegate { ChangeZoom(-0.1, false); };
+            var zoomReset = new ToolStripMenuItem("恢复 100%　Ctrl + 0");
+            zoomReset.Click += delegate { ChangeZoom(0, true); };
+            zoom.DropDownItems.AddRange(new ToolStripItem[] { zoomIn, zoomOut, zoomReset });
+            menu.Opening += delegate
+            {
+                browse.Enabled = serverAlive && !string.IsNullOrEmpty(readyUrl);
+                restart.Enabled = !initializing && !recovering && !shuttingDown;
+                zoom.Text = "界面大小 · " + Math.Round(preferences.Zoom * 100) + "%";
+                zoomIn.Enabled = preferences.Zoom < 1.5;
+                zoomOut.Enabled = preferences.Zoom > 0.75;
+                if (initializing || recovering) trayStatusItem.Text = "正在准备本地连接…";
+            };
+
             var update = new ToolStripMenuItem("检查更新…");
             update.Image = TrayGlyph("refresh");
-            update.Click += async (s, ev) => await RunUpdateFlowAsync(true, true);
+            update.Click += async (s, ev) => await OnUpdateOpenAsync();
+            menu.Opening += delegate
+            {
+                update.Enabled = !updateBusy && !shuttingDown;
+                update.Text = updatePhase == "ready" ? "安装更新并重启…" :
+                    pendingUpdate != null ? "下载更新 v" + pendingUpdate.Version + "…" : "检查更新…";
+            };
 
             var releases = new ToolStripMenuItem("打开下载页面");
             releases.Image = TrayGlyph("download");
@@ -2399,6 +2688,9 @@ namespace DeepSeekHarness
             menu.Items.Add(new ToolStripSeparator());
             menu.Items.Add(open);
             menu.Items.Add(browse);
+            menu.Items.Add(zoom);
+            menu.Items.Add(restart);
+            menu.Items.Add(diagnostics);
             menu.Items.Add(new ToolStripSeparator());
             menu.Items.Add(update);
             menu.Items.Add(releases);
@@ -2926,6 +3218,7 @@ namespace DeepSeekHarness
 
             PublishUpdateState("installing", 100, downloadedVersion, true);
             await Task.Delay(300);
+            SaveDesktopPreferences();
 
             shuttingDown = true;
             trayExit = true;
@@ -2947,8 +3240,14 @@ namespace DeepSeekHarness
             }
             catch (Exception ex)
             {
-                MessageBox.Show("启动安装程序失败，请手动运行：\r\n" + file + "\r\n\r\n" + ex.Message,
-                    "DeepSeek Harness 更新", MessageBoxButtons.OK, MessageBoxIcon.Error);
+                shuttingDown = false;
+                trayExit = false;
+                serverAlive = false;
+                if (trayIcon != null) trayIcon.Visible = true;
+                ShowForm();
+                Log.Error("启动更新安装器", ex);
+                ShowRecoveryPane("更新安装程序暂时无法打开。可重试连接后再安装，或从下载页面手动安装。");
+                PublishUpdateState("ready", 100, downloadedVersion, true);
                 return;
             }
             Application.Exit();

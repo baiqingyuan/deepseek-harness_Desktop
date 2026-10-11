@@ -116,6 +116,10 @@ jobs:
       # 启动冒烟测试：编译通过 ≠ 能运行。
       # v0.7.0 就是编译正常但构造界面时抛异常、进程秒退，用户双击毫无反应。
       # 这里真跑一次 exe，若进程立刻消失就阻断发布，并打印崩溃堆栈。
+      - name: Test desktop preferences
+        shell: pwsh
+        run: ./tests/run-preferences-tests.ps1
+
       - name: Smoke test (launch exe)
         shell: pwsh
         run: |
